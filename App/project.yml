@@ -1,0 +1,66 @@
+name: macsh
+options:
+  bundleIdPrefix: ai
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    ARCHS: arm64
+    EXCLUDED_ARCHS[sdk=*][arch=x86_64]: x86_64
+    ONLY_ACTIVE_ARCH: NO
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "-"
+
+packages:
+  MacshCore:
+    path: ..
+
+targets:
+  macsh:
+    type: application
+    platform: macOS
+    sources:
+      - path: macsh
+        excludes:
+          - "Resources/**"
+      - path: macsh/Resources/rclone
+        buildPhase: resources
+        type: file
+        optional: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.macsh
+        PRODUCT_NAME: macsh
+        INFOPLIST_FILE: macsh/Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: macsh/Resources/macsh.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+    dependencies:
+      - package: MacshCore
+        product: MacshCore
+
+  macsh-lite:
+    type: application
+    platform: macOS
+    sources:
+      - path: macsh
+        excludes:
+          - "Resources/**"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.macsh.lite
+        PRODUCT_NAME: macsh-lite
+        INFOPLIST_FILE: macsh/Resources/Info-Lite.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: macsh/Resources/macsh.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+    dependencies:
+      - package: MacshCore
+        product: MacshCore
