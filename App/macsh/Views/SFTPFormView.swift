@@ -7,7 +7,7 @@ struct SFTPFormDraft {
     var host: String = ""
     var port: String = "22"
     var user: String = ""
-    var remotePath: String = "/"
+    var remotePath: String = ""
     var authKind: SFTPAuthKind = .password
     var password: String = ""
     var keyFilePath: String = ""
@@ -119,7 +119,7 @@ struct SFTPFormView: View {
                         .textFieldStyle(.roundedBorder)
                 }
                 LabeledContent("Path") {
-                    TextField("", text: $draft.remotePath, prompt: Text("/"))
+                    TextField("", text: $draft.remotePath, prompt: Text("leave empty for home, or /var/www"))
                         .textFieldStyle(.roundedBorder)
                 }
             }

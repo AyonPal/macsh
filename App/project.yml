@@ -32,6 +32,15 @@ targets:
         buildPhase: resources
         type: file
         optional: true
+      - path: macsh/Resources/AppIcon.icns
+        buildPhase: resources
+        type: file
+      - path: macsh/Resources/MenuBarIcon.png
+        buildPhase: resources
+        type: file
+      - path: macsh/Resources/MenuBarIcon@2x.png
+        buildPhase: resources
+        type: file
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.macsh
@@ -52,6 +61,15 @@ targets:
       - path: macsh
         excludes:
           - "Resources/**"
+      - path: macsh/Resources/AppIcon.icns
+        buildPhase: resources
+        type: file
+      - path: macsh/Resources/MenuBarIcon.png
+        buildPhase: resources
+        type: file
+      - path: macsh/Resources/MenuBarIcon@2x.png
+        buildPhase: resources
+        type: file
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.macsh.lite

@@ -20,7 +20,15 @@ final class MenuBarController {
         self.loginItemManager = loginItemManager
         self.prefs = prefs
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "⛬"
+        if let button = statusItem.button {
+            if let icon = NSImage(named: "MenuBarIcon") {
+                icon.isTemplate = true
+                icon.size = NSSize(width: 18, height: 18)
+                button.image = icon
+            } else {
+                button.title = "⛬"
+            }
+        }
         rebuildMenu()
         manager.$sessions
             .receive(on: RunLoop.main)
@@ -72,6 +80,9 @@ final class MenuBarController {
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
+        let checkUpdates = NSMenuItem(title: "Check for updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        checkUpdates.target = self
+        menu.addItem(checkUpdates)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -197,5 +208,64 @@ final class MenuBarController {
         win.center()
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func checkForUpdates() {
+        let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        let url = URL(string: "https://api.github.com/repos/AyonPal/macsh/releases/latest")!
+        var req = URLRequest(url: url)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: req) { data, _, error in
+            Task { @MainActor in
+                if let error {
+                    Self.showUpdateAlert(title: "Couldn't check for updates", message: error.localizedDescription, style: .warning)
+                    return
+                }
+                guard let data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let tag = json["tag_name"] as? String else {
+                    Self.showUpdateAlert(title: "Couldn't check for updates", message: "Unexpected response from GitHub.", style: .warning)
+                    return
+                }
+                let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+                let pageURL = (json["html_url"] as? String).flatMap(URL.init(string:))
+                    ?? URL(string: "https://github.com/AyonPal/macsh/releases/latest")!
+                if Self.compareVersions(current, latest) < 0 {
+                    let alert = NSAlert()
+                    alert.messageText = "Update available"
+                    alert.informativeText = "You're on \(current). \(latest) is out."
+                    alert.addButton(withTitle: "Open release page")
+                    alert.addButton(withTitle: "Later")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        NSWorkspace.shared.open(pageURL)
+                    }
+                } else {
+                    Self.showUpdateAlert(title: "You're up to date", message: "macsh \(current) is the latest version.", style: .informational)
+                }
+            }
+        }.resume()
+    }
+
+    private static func showUpdateAlert(title: String, message: String, style: NSAlert.Style) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = style
+        alert.runModal()
+    }
+
+    /// Compares dotted numeric version strings ("0.1.2" vs "0.1.10"). Non-numeric
+    /// suffixes are ignored. Returns -1, 0, or 1.
+    private static func compareVersions(_ a: String, _ b: String) -> Int {
+        let parse: (String) -> [Int] = { s in
+            s.split(separator: ".").map { Int($0.prefix(while: \.isNumber)) ?? 0 }
+        }
+        let lhs = parse(a), rhs = parse(b)
+        for i in 0..<max(lhs.count, rhs.count) {
+            let l = i < lhs.count ? lhs[i] : 0
+            let r = i < rhs.count ? rhs[i] : 0
+            if l != r { return l < r ? -1 : 1 }
+        }
+        return 0
     }
 }
