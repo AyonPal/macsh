@@ -1,12 +1,15 @@
 <div align="center">
 
+<img src="docs/icon.png" alt="macsh" width="128" height="128">
+
 # macsh
 
 **Mount SFTP, S3, and FTP servers as native macOS volumes.**
 No macFUSE. No kernel extensions. No security prompts.
 
 [Download](https://github.com/AyonPal/macsh/releases) ·
-[Install instructions](#install)
+[Install](#install) ·
+[Highlights](#highlights)
 
 </div>
 
@@ -15,7 +18,7 @@ No macFUSE. No kernel extensions. No security prompts.
 ## What it does
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="macsh mounting a remote in Finder" width="720">
+  <img src="docs/screenshot.png" alt="macsh — Add Remote form and menu bar dropdown" width="640">
 </p>
 
 Your remote files, in Finder. Open, edit, drag — like any folder on your Mac.
@@ -31,11 +34,11 @@ Your remote files, in Finder. Open, edit, drag — like any folder on your Mac.
 
 ## Install
 
-Releases are **unsigned** (no Apple Developer ID yet). Download the DMG
-from the [latest release](https://github.com/AyonPal/macsh/releases)
-and drag the app to `/Applications`.
+Releases are **unsigned** (no Apple Developer ID yet). Pick one DMG from
+the [latest release](https://github.com/AyonPal/macsh/releases) and drag
+the app to `/Applications`.
 
-Then run **one** of these commands once, matching the version you installed:
+Then run the matching command **once** to clear macOS's Gatekeeper flag:
 
 ```bash
 # if you installed macsh
@@ -45,22 +48,21 @@ xattr -dr com.apple.quarantine /Applications/macsh.app
 xattr -dr com.apple.quarantine /Applications/macsh-lite.app
 ```
 
-That clears macOS's Gatekeeper flag. Without it you'll see
-*"macsh is damaged and can't be opened"* — that's Gatekeeper, not
-actual corruption.
+Without that you'll see *"macsh is damaged and can't be opened"* —
+that's Gatekeeper, not actual corruption.
 
-After that, launch the app. A small icon appears in your menu bar; click
-it to add your first remote.
+Launch the app. A small icon appears in your menu bar; click it to add
+your first remote.
 
 ### Two flavours
 
 |              | `macsh`                       | `macsh-lite`                 |
 | ------------ | ----------------------------- | ---------------------------- |
-| **DMG size** | ~32 MB                        | ~600 KB                      |
+| **DMG size** | ~32 MB                        | ~800 KB                      |
 | **rclone**   | bundled inside the app        | uses your `brew install rclone` |
 | **Best for** | "just works" install          | smaller download / power users |
 
-Pick one. They can coexist if you really want both.
+Pick one. They can coexist if you want both.
 
 ## Requirements
 
