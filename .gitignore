@@ -52,6 +52,10 @@ sftp-data/
 # Internal design/planning scratch — not part of the public repo.
 docs/superpowers/
 
+# Architecture diagram source (d2 + working files). The rendered
+# PNG/SVG live under docs/architecture/ and are committed.
+/architecture/
+
 # Dev-only screenshot helper. Run locally to capture README images.
 scripts/capture-screenshots.swift
 

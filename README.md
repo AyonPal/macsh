@@ -32,6 +32,12 @@ Your remote files, in Finder. Open, edit, drag — like any folder on your Mac.
 - **Auto-mount at login.**
 - **Passwords stored in your Keychain** — never on disk in plaintext.
 
+## How it works
+
+<p align="center">
+  <img src="docs/architecture/architecture.png" alt="macsh architecture diagram" width="720">
+</p>
+
 ## Install
 
 Releases are **unsigned** (no Apple Developer ID yet). Pick one DMG from
