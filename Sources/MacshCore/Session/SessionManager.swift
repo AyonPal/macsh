@@ -72,7 +72,7 @@ public final class SessionManager: ObservableObject {
         retryTasks[remoteID] = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                try self.mount(remoteID: remoteID)
+                try await self.mount(remoteID: remoteID)
                 self.retryTasks[remoteID] = nil
             } catch {
                 let nextAttempt = attempt + 1
@@ -166,7 +166,7 @@ public final class SessionManager: ObservableObject {
         try reload()
     }
 
-    public func mount(remoteID: UUID) throws {
+    public func mount(remoteID: UUID) async throws {
         guard let session = sessions.first(where: { $0.id == remoteID }) else { return }
         session.transition(to: .starting)
 
@@ -206,8 +206,9 @@ public final class SessionManager: ObservableObject {
                     envOverrides[RcloneConfigBuilder.passwordEnvVar(remoteID: remote.id)] =
                         try RcloneProcess.obscure(plaintext: p, binary: rcloneBinary)
                 }
+                // ssh-keyscan runs off the main actor — no UI blocking
                 if let verifier = hostKeyVerifier {
-                    try verifier.ensureKnown(host: sftp.host, port: sftp.port)
+                    try await verifier.ensureKnown(host: sftp.host, port: sftp.port)
                 }
                 remotePath = sftp.remotePath
 
@@ -258,7 +259,9 @@ public final class SessionManager: ObservableObject {
                     envOverrides: envOverrides
                 )
             }
-            try waitForPort(spawned.port, timeout: 30.0)
+
+            // Async wait — releases the main actor so the UI stays responsive while rclone starts.
+            try await waitForPort(spawned.port, timeout: 30.0)
 
             let mountpoint: String
             switch remote.mountProtocol {
@@ -320,24 +323,33 @@ public final class SessionManager: ObservableObject {
         logsDir.appendingPathComponent("\(remoteID.uuidString).log")
     }
 
-    private func waitForPort(_ port: Int, timeout: TimeInterval) throws {
+    // MARK: - Port polling (async — releases main actor between checks)
+
+    private func waitForPort(_ port: Int, timeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            let sock = socket(AF_INET, SOCK_STREAM, 0)
-            if sock < 0 { Thread.sleep(forTimeInterval: 0.1); continue }
-            var addr = sockaddr_in()
-            addr.sin_family = sa_family_t(AF_INET)
-            addr.sin_port = UInt16(port).bigEndian
-            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-            let result = withUnsafePointer(to: &addr) { ptr -> Int32 in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                    Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-            close(sock)
-            if result == 0 { return }
-            Thread.sleep(forTimeInterval: 0.1)
+            if isPortOpen(port) { return }
+            try await Task.sleep(nanoseconds: 100_000_000) // 0.1s, main actor free
         }
-        throw NSError(domain: "macsh", code: 1, userInfo: [NSLocalizedDescriptionKey: "rclone serve did not open port \(port) within \(timeout)s"])
+        throw NSError(
+            domain: "macsh", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "rclone serve did not open port \(port) within \(Int(timeout))s"]
+        )
+    }
+
+    private func isPortOpen(_ port: Int) -> Bool {
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        defer { close(sock) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let result = withUnsafePointer(to: &addr) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result == 0
     }
 }

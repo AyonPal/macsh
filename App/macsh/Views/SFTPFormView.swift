@@ -109,11 +109,15 @@ struct SFTPFormDraft {
     }
 }
 
+private struct SSHConfigPickerData: Identifiable {
+    let id = UUID()
+    let hosts: [SSHConfigHost]
+}
+
 struct SFTPFormView: View {
     @Binding var draft: SFTPFormDraft
     @State private var showGenerateSheet = false
-    @State private var showSSHConfigPicker = false
-    @State private var sshConfigHosts: [SSHConfigHost] = []
+    @State private var sshConfigPickerData: SSHConfigPickerData? = nil
 
     var body: some View {
         Form {
@@ -146,18 +150,17 @@ struct SFTPFormView: View {
                     Button("From SSH Config…") {
                         let hosts = SSHConfigParser.defaultConfigHosts()
                         if !hosts.isEmpty {
-                            sshConfigHosts = hosts
-                            showSSHConfigPicker = true
+                            sshConfigPickerData = SSHConfigPickerData(hosts: hosts)
                         }
                     }
                     .buttonStyle(.link)
                     .font(.caption)
                 }
             }
-            .sheet(isPresented: $showSSHConfigPicker) {
-                SSHConfigPickerSheet(hosts: sshConfigHosts) { host in
+            .sheet(item: $sshConfigPickerData) { data in
+                SSHConfigPickerSheet(hosts: data.hosts) { host in
                     draft.apply(sshConfigHost: host)
-                    showSSHConfigPicker = false
+                    sshConfigPickerData = nil
                 }
             }
 
@@ -192,6 +195,8 @@ struct SFTPFormView: View {
                                 panel.canChooseFiles = true
                                 panel.canChooseDirectories = false
                                 panel.allowsMultipleSelection = false
+                                panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+                                    .appendingPathComponent(".ssh")
                                 if panel.runModal() == .OK, let url = panel.url {
                                     draft.keyFilePath = url.path
                                 }
