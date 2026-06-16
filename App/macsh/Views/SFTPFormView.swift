@@ -39,6 +39,17 @@ struct SFTPFormDraft {
         }
     }
 
+    mutating func apply(sshConfigHost h: SSHConfigHost) {
+        name = h.alias
+        host = h.hostname
+        port = String(h.port)
+        if let u = h.user { user = u }
+        if let keyFile = h.identityFile {
+            authKind = .keyFile
+            keyFilePath = keyFile
+        }
+    }
+
     func validate() -> String? {
         if name.trimmingCharacters(in: .whitespaces).isEmpty { return "Name required" }
         if host.trimmingCharacters(in: .whitespaces).isEmpty { return "Host required" }
@@ -53,6 +64,8 @@ struct SFTPFormDraft {
         case .generatedKey:
             // On edit, the existing key in keychain stays unless user regenerates.
             if generatedKeyPair == nil && !isEditing { return "Generate the key first" }
+        case .sshAgent:
+            break
         }
         return nil
     }
@@ -89,6 +102,8 @@ struct SFTPFormDraft {
                 privateKeyPath: generatedKeyPair?.privateKeyPEM,
                 keyPassphrase: nil
             )
+        case .sshAgent:
+            secrets = SFTPSecrets(password: nil, privateKeyPath: nil, keyPassphrase: nil)
         }
         return (remote, secrets)
     }
@@ -97,10 +112,12 @@ struct SFTPFormDraft {
 struct SFTPFormView: View {
     @Binding var draft: SFTPFormDraft
     @State private var showGenerateSheet = false
+    @State private var showSSHConfigPicker = false
+    @State private var sshConfigHosts: [SSHConfigHost] = []
 
     var body: some View {
         Form {
-            Section("Connection") {
+            Section {
                 LabeledContent("Name") {
                     TextField("", text: $draft.name, prompt: Text("My laptop"))
                         .textFieldStyle(.roundedBorder)
@@ -122,6 +139,26 @@ struct SFTPFormView: View {
                     TextField("", text: $draft.remotePath, prompt: Text("leave empty for home, or /var/www"))
                         .textFieldStyle(.roundedBorder)
                 }
+            } header: {
+                HStack {
+                    Text("Connection")
+                    Spacer()
+                    Button("From SSH Config…") {
+                        let hosts = SSHConfigParser.defaultConfigHosts()
+                        if !hosts.isEmpty {
+                            sshConfigHosts = hosts
+                            showSSHConfigPicker = true
+                        }
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                }
+            }
+            .sheet(isPresented: $showSSHConfigPicker) {
+                SSHConfigPickerSheet(hosts: sshConfigHosts) { host in
+                    draft.apply(sshConfigHost: host)
+                    showSSHConfigPicker = false
+                }
             }
 
             Section("Authentication") {
@@ -130,6 +167,7 @@ struct SFTPFormView: View {
                         Text("Password").tag(SFTPAuthKind.password)
                         Text("Key file").tag(SFTPAuthKind.keyFile)
                         Text("Generate").tag(SFTPAuthKind.generatedKey)
+                        Text("SSH Agent").tag(SFTPAuthKind.sshAgent)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
@@ -182,6 +220,11 @@ struct SFTPFormView: View {
                     .sheet(isPresented: $showGenerateSheet) {
                         GenerateKeySheet { kp in draft.generatedKeyPair = kp }
                     }
+                case .sshAgent:
+                    LabeledContent("Agent") {
+                        Text("Uses the system SSH agent (SSH_AUTH_SOCK).")
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -205,5 +248,59 @@ struct SFTPFormView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+    }
+}
+
+private struct SSHConfigPickerSheet: View {
+    let hosts: [SSHConfigHost]
+    let onSelect: (SSHConfigHost) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Select SSH Host")
+                .font(.headline)
+                .padding()
+
+            Divider()
+
+            List(hosts) { host in
+                Button {
+                    onSelect(host)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(host.alias).fontWeight(.medium)
+                        HStack(spacing: 6) {
+                            Text("\(host.hostname):\(host.port)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if let user = host.user {
+                                Text("·").foregroundStyle(.secondary).font(.caption)
+                                Text(user).font(.caption).foregroundStyle(.secondary)
+                            }
+                            if host.identityFile != nil {
+                                Text("·").foregroundStyle(.secondary).font(.caption)
+                                Text("key").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .listStyle(.plain)
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+        }
+        .frame(width: 340, height: 320)
     }
 }

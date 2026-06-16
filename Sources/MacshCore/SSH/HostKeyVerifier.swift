@@ -22,6 +22,22 @@ public enum HostKeyError: Error {
     case fingerprintComputationFailed
 }
 
+extension HostKeyError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .keyscanFailed(let stderr):
+            let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail.isEmpty
+                ? "Could not scan the server's host key. Check that the host is reachable on the configured port."
+                : "Could not scan the server's host key: \(detail)"
+        case .rejectedByUser:
+            return "Connection cancelled: the server's host key was not trusted."
+        case .fingerprintComputationFailed:
+            return "Could not compute the server's key fingerprint."
+        }
+    }
+}
+
 @MainActor
 public final class HostKeyVerifier {
     public let knownHostsPath: String
@@ -40,8 +56,19 @@ public final class HostKeyVerifier {
     /// differs, ask the user about the change.
     public func ensureKnown(host: String, port: Int) throws {
         let existing = readExistingLines(host: host, port: port)
-        let liveLines = try keyscan(host: host, port: port)
+
+        // For already-trusted hosts, tolerate a keyscan failure (transient network issues,
+        // servers that block port scans, etc.) and proceed with the cached key.
+        let liveLines: [String]
+        do {
+            liveLines = try keyscan(host: host, port: port)
+        } catch {
+            if !existing.isEmpty { return }
+            throw error
+        }
+
         guard !liveLines.isEmpty else {
+            if !existing.isEmpty { return }
             throw HostKeyError.keyscanFailed(stderr: "no host keys returned by ssh-keyscan")
         }
 

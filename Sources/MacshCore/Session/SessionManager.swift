@@ -194,6 +194,8 @@ public final class SessionManager: ObservableObject {
                         ephemeralKeyURL = url
                         resolvedKeyPath = url.path
                     }
+                case .sshAgent:
+                    break
                 }
                 bundle.sftp = SFTPSecrets(
                     password: password,
@@ -256,7 +258,7 @@ public final class SessionManager: ObservableObject {
                     envOverrides: envOverrides
                 )
             }
-            try waitForPort(spawned.port, timeout: 5.0)
+            try waitForPort(spawned.port, timeout: 30.0)
 
             let mountpoint: String
             switch remote.mountProtocol {

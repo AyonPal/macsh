@@ -48,6 +48,7 @@ public enum SFTPAuthKind: String, Codable, Equatable {
     case password
     case keyFile        // path to existing private key (path stored in Keychain)
     case generatedKey   // app-generated key; private PEM stored in Keychain
+    case sshAgent       // delegate auth to the system SSH agent (SSH_AUTH_SOCK)
 }
 
 public struct S3Config: Codable, Equatable {
