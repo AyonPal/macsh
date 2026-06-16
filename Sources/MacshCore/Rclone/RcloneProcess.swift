@@ -121,20 +121,25 @@ public final class RcloneProcess {
         return Spawned(process: process, port: port, user: user, password: password)
     }
 
-    /// Runs `rclone obscure <plaintext>` and returns the obscured form. rclone's env-var
-    /// override for a password expects the obscured form (the same one used in config files);
-    /// passing plaintext makes rclone fail with "input too short when revealing password".
-    public static func obscure(plaintext: String, binary: URL) throws -> String {
-        let p = Process()
-        p.executableURL = binary
-        p.arguments = ["obscure", plaintext]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        try p.run()
-        p.waitUntilExit()
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    /// Runs `rclone obscure <plaintext>` on a background thread and returns the obscured form.
+    /// rclone's env-var override expects the obscured form; passing plaintext fails with
+    /// "input too short when revealing password".
+    public static func obscure(plaintext: String, binary: URL) async throws -> String {
+        try await withCheckedThrowingContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let p = Process()
+                p.executableURL = binary
+                p.arguments = ["obscure", plaintext]
+                let out = Pipe()
+                p.standardOutput = out
+                p.standardError = Pipe()
+                do { try p.run() } catch { cont.resume(throwing: error); return }
+                p.waitUntilExit()
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                cont.resume(returning: String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+            }
+        }
     }
 
     private static func findFreePort() throws -> Int {

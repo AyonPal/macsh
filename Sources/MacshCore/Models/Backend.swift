@@ -34,13 +34,16 @@ public struct SFTPConfig: Codable, Equatable {
     public var user: String
     public var remotePath: String
     public var authKind: SFTPAuthKind
+    /// Explicit SSH agent socket path. nil = inherit SSH_AUTH_SOCK from environment.
+    public var sshAgentSocket: String?
 
-    public init(host: String, port: Int, user: String, remotePath: String, authKind: SFTPAuthKind) {
+    public init(host: String, port: Int, user: String, remotePath: String, authKind: SFTPAuthKind, sshAgentSocket: String? = nil) {
         self.host = host
         self.port = port
         self.user = user
         self.remotePath = remotePath
         self.authKind = authKind
+        self.sshAgentSocket = sshAgentSocket
     }
 }
 
@@ -48,6 +51,7 @@ public enum SFTPAuthKind: String, Codable, Equatable {
     case password
     case keyFile        // path to existing private key (path stored in Keychain)
     case generatedKey   // app-generated key; private PEM stored in Keychain
+    case sshAgent       // delegate auth to the system SSH agent (SSH_AUTH_SOCK)
 }
 
 public struct S3Config: Codable, Equatable {

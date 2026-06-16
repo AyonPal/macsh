@@ -91,7 +91,7 @@ struct AddRemoteView: View {
     @ViewBuilder
     private var form: some View {
         switch kind {
-        case .sftp: SFTPFormView(draft: $sftp)
+        case .sftp: SFTPFormView(draft: $sftp, rcloneBinary: manager.rcloneBinary)
         case .s3:   S3FormView(draft: $s3)
         case .ftp:  FTPFormView(draft: $ftp)
         }

@@ -15,6 +15,12 @@ final class MenuBarController {
     private var editWindows: [UUID: NSWindow] = [:]
     private var logWindows: [UUID: NSWindow] = [:]
 
+    // Spinner animation for .starting sessions
+    private var spinnerTimer: Timer?
+    private var spinnerFrame = 0
+    private var sessionMenuItems: [UUID: NSMenuItem] = [:]
+    private static let spinnerFrames = ["◐", "◓", "◑", "◒"]
+
     init(manager: SessionManager, loginItemManager: LoginItemManager, prefs: UserPreferences) {
         self.manager = manager
         self.loginItemManager = loginItemManager
@@ -37,12 +43,14 @@ final class MenuBarController {
     }
 
     private func rebuildMenu() {
+        sessionMenuItems.removeAll()
         let menu = NSMenu()
         if manager.sessions.isEmpty {
             menu.addItem(NSMenuItem(title: "(no remotes)", action: nil, keyEquivalent: ""))
         } else {
             for session in manager.sessions {
                 let item = NSMenuItem(title: title(for: session), action: #selector(toggleMount(_:)), keyEquivalent: "")
+                sessionMenuItems[session.id] = item
                 item.target = self
                 item.representedObject = session.id
                 let submenu = NSMenu()
@@ -86,6 +94,43 @@ final class MenuBarController {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
+        syncSpinner()
+    }
+
+    // MARK: - Spinner
+
+    private func syncSpinner() {
+        let hasStarting = manager.sessions.contains { if case .starting = $0.status { return true }; return false }
+        if hasStarting {
+            if spinnerTimer == nil {
+                let t = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+                    self?.tickSpinner()
+                }
+                RunLoop.main.add(t, forMode: .common)
+                spinnerTimer = t
+            }
+        } else {
+            spinnerTimer?.invalidate()
+            spinnerTimer = nil
+            // Flush final titles into the live menu items — the visible NSMenu may still
+            // be the old instance (NSMenu tracks in its own run loop mode and ignores
+            // statusItem.menu reassignment until closed).
+            for session in manager.sessions {
+                sessionMenuItems[session.id]?.title = title(for: session)
+            }
+        }
+    }
+
+    private func tickSpinner() {
+        spinnerFrame = (spinnerFrame + 1) % Self.spinnerFrames.count
+        let dot = Self.spinnerFrames[spinnerFrame]
+        for session in manager.sessions {
+            if case .starting = session.status {
+                sessionMenuItems[session.id]?.title = "\(dot) \(session.remote.name)"
+            } else {
+                sessionMenuItems[session.id]?.title = title(for: session)
+            }
+        }
     }
 
     private func isMounted(_ session: RemoteSession) -> Bool {
@@ -110,8 +155,8 @@ final class MenuBarController {
         Task { @MainActor in
             do {
                 switch session.status {
-                case .mounted: try manager.unmount(remoteID: id)
-                default: try manager.mount(remoteID: id)
+                case .mounted: try await manager.unmount(remoteID: id)
+                default: try await manager.mount(remoteID: id)
                 }
             } catch {
                 NSAlert(error: error).runModal()
@@ -129,8 +174,10 @@ final class MenuBarController {
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        do { try manager.delete(id) }
-        catch { NSAlert(error: error).runModal() }
+        Task { @MainActor in
+            do { try await manager.delete(id) }
+            catch { NSAlert(error: error).runModal() }
+        }
     }
 
     @objc private func editRemote(_ sender: NSMenuItem) {

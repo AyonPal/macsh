@@ -10,7 +10,7 @@ public final class SessionManager: ObservableObject {
     private let keychain: KeychainService
     private let mounter: Mounter
     private let logsDir: URL
-    private let rcloneBinary: URL
+    public let rcloneBinary: URL
     private let hostKeyVerifier: HostKeyVerifier?
 
     private var retryTasks: [UUID: Task<Void, Never>] = [:]
@@ -58,12 +58,20 @@ public final class SessionManager: ObservableObject {
     /// SIGKILL/crash — without this, every relaunch would pile up `<name>-1`,
     /// `<name>-2`, … entries in /Volumes since NetFS auto-numbers collisions.
     public func autoMountAll() {
-        for session in sessions {
-            let volname = mounter.volumeName(from: session.remote.name)
-            mounter.reconcileStaleMount(volumeName: volname)
-        }
-        for session in sessions where session.remote.autoMount {
-            scheduleMount(remoteID: session.id, attempt: 0)
+        let mounter = self.mounter
+        let volnames = sessions.map { mounter.volumeName(from: $0.remote.name) }
+        let autoMountIDs = sessions.filter { $0.remote.autoMount }.map { $0.id }
+        Task { @MainActor [weak self] in
+            // Reconcile all stale mounts in parallel, off the main actor.
+            await withTaskGroup(of: Void.self) { group in
+                for volname in volnames {
+                    group.addTask { await mounter.reconcileStaleMount(volumeName: volname) }
+                }
+            }
+            guard let self else { return }
+            for id in autoMountIDs {
+                self.scheduleMount(remoteID: id, attempt: 0)
+            }
         }
     }
 
@@ -72,7 +80,7 @@ public final class SessionManager: ObservableObject {
         retryTasks[remoteID] = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                try self.mount(remoteID: remoteID)
+                try await self.mount(remoteID: remoteID)
                 self.retryTasks[remoteID] = nil
             } catch {
                 let nextAttempt = attempt + 1
@@ -150,11 +158,11 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    public func delete(_ remoteID: UUID) throws {
+    public func delete(_ remoteID: UUID) async throws {
         retryTasks[remoteID]?.cancel()
         retryTasks[remoteID] = nil
         if let session = sessions.first(where: { $0.id == remoteID }), case .mounted = session.status {
-            try? unmount(remoteID: remoteID)
+            try? await unmount(remoteID: remoteID)
         }
         try? keychain.delete(remoteID: remoteID, kind: .password)
         try? keychain.delete(remoteID: remoteID, kind: .keyPassphrase)
@@ -166,7 +174,7 @@ public final class SessionManager: ObservableObject {
         try reload()
     }
 
-    public func mount(remoteID: UUID) throws {
+    public func mount(remoteID: UUID) async throws {
         guard let session = sessions.first(where: { $0.id == remoteID }) else { return }
         session.transition(to: .starting)
 
@@ -194,6 +202,11 @@ public final class SessionManager: ObservableObject {
                         ephemeralKeyURL = url
                         resolvedKeyPath = url.path
                     }
+                case .sshAgent:
+                    // Use the explicitly configured socket; fall back to SSH_AUTH_SOCK from env.
+                    let sock = sftp.sshAgentSocket
+                        ?? ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"]
+                    if let sock { envOverrides["SSH_AUTH_SOCK"] = sock }
                 }
                 bundle.sftp = SFTPSecrets(
                     password: password,
@@ -202,10 +215,11 @@ public final class SessionManager: ObservableObject {
                 )
                 if sftp.authKind == .password, let p = password {
                     envOverrides[RcloneConfigBuilder.passwordEnvVar(remoteID: remote.id)] =
-                        try RcloneProcess.obscure(plaintext: p, binary: rcloneBinary)
+                        try await RcloneProcess.obscure(plaintext: p, binary: rcloneBinary)
                 }
+                // ssh-keyscan runs off the main actor — no UI blocking
                 if let verifier = hostKeyVerifier {
-                    try verifier.ensureKnown(host: sftp.host, port: sftp.port)
+                    try await verifier.ensureKnown(host: sftp.host, port: sftp.port)
                 }
                 remotePath = sftp.remotePath
 
@@ -224,7 +238,7 @@ public final class SessionManager: ObservableObject {
                 }
                 bundle.ftp = FTPSecrets(password: password)
                 envOverrides[RcloneConfigBuilder.passwordEnvVar(remoteID: remote.id)] =
-                    try RcloneProcess.obscure(plaintext: password, binary: rcloneBinary)
+                    try await RcloneProcess.obscure(plaintext: password, binary: rcloneBinary)
                 remotePath = ftp.remotePath
             }
 
@@ -256,7 +270,10 @@ public final class SessionManager: ObservableObject {
                     envOverrides: envOverrides
                 )
             }
-            try waitForPort(spawned.port, timeout: 5.0)
+
+            // Async wait — releases the main actor so the UI stays responsive while rclone starts.
+            // Also detects early rclone exit so we don't wait 30s for a dead process.
+            try await waitForPort(spawned.port, process: spawned.process, logURL: logURL, timeout: 30.0)
 
             let mountpoint: String
             switch remote.mountProtocol {
@@ -285,23 +302,31 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    public func unmount(remoteID: UUID) throws {
+    public func unmount(remoteID: UUID) async throws {
         guard let session = sessions.first(where: { $0.id == remoteID }) else { return }
         retryTasks[remoteID]?.cancel()
         retryTasks[remoteID] = nil
-        if let mp = session.mountpoint {
-            try mounter.unmount(mountpoint: mp)
-        }
-        if let proc = session.rcloneProcess, proc.isRunning {
-            proc.terminate()
-        }
-        if let url = session.ephemeralKeyURL {
-            try? FileManager.default.removeItem(at: url)
-        }
+        let mp = session.mountpoint
+        let proc = session.rcloneProcess
+        let keyURL = session.ephemeralKeyURL
+        // Clear state immediately so the menu reflects "idle" while diskutil runs.
         session.rcloneProcess = nil
         session.mountpoint = nil
         session.ephemeralKeyURL = nil
         session.transition(to: .idle)
+        // diskutil unmount blocks — run off the main actor.
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    if let mp { try self.mounter.unmount(mountpoint: mp) }
+                    if let proc, proc.isRunning { proc.terminate() }
+                    if let url = keyURL { try? FileManager.default.removeItem(at: url) }
+                    cont.resume()
+                } catch {
+                    cont.resume(throwing: error)
+                }
+            }
+        }
     }
 
     public func shutdownAll() {
@@ -309,7 +334,7 @@ public final class SessionManager: ObservableObject {
         retryTasks.removeAll()
         for session in sessions {
             if case .mounted = session.status {
-                try? unmount(remoteID: session.id)
+                Task { try? await unmount(remoteID: session.id) }
             }
         }
     }
@@ -318,24 +343,53 @@ public final class SessionManager: ObservableObject {
         logsDir.appendingPathComponent("\(remoteID.uuidString).log")
     }
 
-    private func waitForPort(_ port: Int, timeout: TimeInterval) throws {
+    // MARK: - Port polling (async — releases main actor between checks)
+
+    private func waitForPort(_ port: Int, process: Process, logURL: URL, timeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            let sock = socket(AF_INET, SOCK_STREAM, 0)
-            if sock < 0 { Thread.sleep(forTimeInterval: 0.1); continue }
-            var addr = sockaddr_in()
-            addr.sin_family = sa_family_t(AF_INET)
-            addr.sin_port = UInt16(port).bigEndian
-            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-            let result = withUnsafePointer(to: &addr) { ptr -> Int32 in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                    Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
+            if isPortOpen(port) { return }
+            // Detect early exit — no need to wait the full timeout for a dead process
+            if !process.isRunning {
+                let reason = lastCriticalLine(in: logURL)
+                throw NSError(
+                    domain: "macsh", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: reason ?? "rclone exited unexpectedly (code \(process.terminationStatus))"]
+                )
             }
-            close(sock)
-            if result == 0 { return }
-            Thread.sleep(forTimeInterval: 0.1)
+            try await Task.sleep(nanoseconds: 100_000_000) // 0.1s
         }
-        throw NSError(domain: "macsh", code: 1, userInfo: [NSLocalizedDescriptionKey: "rclone serve did not open port \(port) within \(timeout)s"])
+        throw NSError(
+            domain: "macsh", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "rclone serve did not open port \(port) within \(Int(timeout))s"]
+        )
+    }
+
+    /// Reads the last CRITICAL or ERROR line from a rclone log file for user-facing errors.
+    private func lastCriticalLine(in url: URL) -> String? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let line = text.split(separator: "\n")
+            .last { $0.contains("CRITICAL") || $0.contains("ERROR") }
+            .map(String.init)?
+            .replacingOccurrences(of: #"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} (CRITICAL|ERROR): "#,
+                                   with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        return line?.isEmpty == false ? line : nil
+    }
+
+    private func isPortOpen(_ port: Int) -> Bool {
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        defer { close(sock) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let result = withUnsafePointer(to: &addr) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result == 0
     }
 }

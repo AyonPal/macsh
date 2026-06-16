@@ -74,6 +74,8 @@ public enum RcloneConfigBuilder {
             case .keyFile, .generatedKey:
                 guard let path = s.privateKeyPath else { throw RcloneConfigError.keyFileAuthRequiresPath }
                 lines.append("key_file = \(path)")
+            case .sshAgent:
+                lines.append("use_agent = true")
             }
             if let kh = knownHostsPath {
                 lines.append("known_hosts_file = \(kh)")
