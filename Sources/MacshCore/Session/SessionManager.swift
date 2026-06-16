@@ -10,7 +10,7 @@ public final class SessionManager: ObservableObject {
     private let keychain: KeychainService
     private let mounter: Mounter
     private let logsDir: URL
-    private let rcloneBinary: URL
+    public let rcloneBinary: URL
     private let hostKeyVerifier: HostKeyVerifier?
 
     private var retryTasks: [UUID: Task<Void, Never>] = [:]
@@ -150,11 +150,11 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    public func delete(_ remoteID: UUID) throws {
+    public func delete(_ remoteID: UUID) async throws {
         retryTasks[remoteID]?.cancel()
         retryTasks[remoteID] = nil
         if let session = sessions.first(where: { $0.id == remoteID }), case .mounted = session.status {
-            try? unmount(remoteID: remoteID)
+            try? await unmount(remoteID: remoteID)
         }
         try? keychain.delete(remoteID: remoteID, kind: .password)
         try? keychain.delete(remoteID: remoteID, kind: .keyPassphrase)
@@ -195,7 +195,10 @@ public final class SessionManager: ObservableObject {
                         resolvedKeyPath = url.path
                     }
                 case .sshAgent:
-                    break
+                    // Use the explicitly configured socket; fall back to SSH_AUTH_SOCK from env.
+                    let sock = sftp.sshAgentSocket
+                        ?? ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"]
+                    if let sock { envOverrides["SSH_AUTH_SOCK"] = sock }
                 }
                 bundle.sftp = SFTPSecrets(
                     password: password,
@@ -261,7 +264,8 @@ public final class SessionManager: ObservableObject {
             }
 
             // Async wait — releases the main actor so the UI stays responsive while rclone starts.
-            try await waitForPort(spawned.port, timeout: 30.0)
+            // Also detects early rclone exit so we don't wait 30s for a dead process.
+            try await waitForPort(spawned.port, process: spawned.process, logURL: logURL, timeout: 30.0)
 
             let mountpoint: String
             switch remote.mountProtocol {
@@ -290,23 +294,31 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    public func unmount(remoteID: UUID) throws {
+    public func unmount(remoteID: UUID) async throws {
         guard let session = sessions.first(where: { $0.id == remoteID }) else { return }
         retryTasks[remoteID]?.cancel()
         retryTasks[remoteID] = nil
-        if let mp = session.mountpoint {
-            try mounter.unmount(mountpoint: mp)
-        }
-        if let proc = session.rcloneProcess, proc.isRunning {
-            proc.terminate()
-        }
-        if let url = session.ephemeralKeyURL {
-            try? FileManager.default.removeItem(at: url)
-        }
+        let mp = session.mountpoint
+        let proc = session.rcloneProcess
+        let keyURL = session.ephemeralKeyURL
+        // Clear state immediately so the menu reflects "idle" while diskutil runs.
         session.rcloneProcess = nil
         session.mountpoint = nil
         session.ephemeralKeyURL = nil
         session.transition(to: .idle)
+        // diskutil unmount blocks — run off the main actor.
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    if let mp { try self.mounter.unmount(mountpoint: mp) }
+                    if let proc, proc.isRunning { proc.terminate() }
+                    if let url = keyURL { try? FileManager.default.removeItem(at: url) }
+                    cont.resume()
+                } catch {
+                    cont.resume(throwing: error)
+                }
+            }
+        }
     }
 
     public func shutdownAll() {
@@ -314,7 +326,7 @@ public final class SessionManager: ObservableObject {
         retryTasks.removeAll()
         for session in sessions {
             if case .mounted = session.status {
-                try? unmount(remoteID: session.id)
+                Task { try? await unmount(remoteID: session.id) }
             }
         }
     }
@@ -325,16 +337,36 @@ public final class SessionManager: ObservableObject {
 
     // MARK: - Port polling (async — releases main actor between checks)
 
-    private func waitForPort(_ port: Int, timeout: TimeInterval) async throws {
+    private func waitForPort(_ port: Int, process: Process, logURL: URL, timeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if isPortOpen(port) { return }
-            try await Task.sleep(nanoseconds: 100_000_000) // 0.1s, main actor free
+            // Detect early exit — no need to wait the full timeout for a dead process
+            if !process.isRunning {
+                let reason = lastCriticalLine(in: logURL)
+                throw NSError(
+                    domain: "macsh", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: reason ?? "rclone exited unexpectedly (code \(process.terminationStatus))"]
+                )
+            }
+            try await Task.sleep(nanoseconds: 100_000_000) // 0.1s
         }
         throw NSError(
             domain: "macsh", code: 1,
             userInfo: [NSLocalizedDescriptionKey: "rclone serve did not open port \(port) within \(Int(timeout))s"]
         )
+    }
+
+    /// Reads the last CRITICAL or ERROR line from a rclone log file for user-facing errors.
+    private func lastCriticalLine(in url: URL) -> String? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let line = text.split(separator: "\n")
+            .last { $0.contains("CRITICAL") || $0.contains("ERROR") }
+            .map(String.init)?
+            .replacingOccurrences(of: #"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} (CRITICAL|ERROR): "#,
+                                   with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        return line?.isEmpty == false ? line : nil
     }
 
     private func isPortOpen(_ port: Int) -> Bool {

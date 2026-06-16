@@ -155,7 +155,7 @@ final class MenuBarController {
         Task { @MainActor in
             do {
                 switch session.status {
-                case .mounted: try manager.unmount(remoteID: id)
+                case .mounted: try await manager.unmount(remoteID: id)
                 default: try await manager.mount(remoteID: id)
                 }
             } catch {
@@ -174,8 +174,10 @@ final class MenuBarController {
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        do { try manager.delete(id) }
-        catch { NSAlert(error: error).runModal() }
+        Task { @MainActor in
+            do { try await manager.delete(id) }
+            catch { NSAlert(error: error).runModal() }
+        }
     }
 
     @objc private func editRemote(_ sender: NSMenuItem) {

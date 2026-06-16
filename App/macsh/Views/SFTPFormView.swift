@@ -16,6 +16,8 @@ struct SFTPFormDraft {
     var autoMount: Bool = true
     var liveUpdates: Bool = true
     var mountProtocol: MountProtocol = .webdav
+    /// nil = inherit SSH_AUTH_SOCK from env (default). Set by agent picker after test.
+    var sshAgentSocket: String? = nil
 
     /// Populated when editing an existing remote. Skipped when adding.
     var existingRemoteID: UUID? = nil
@@ -36,6 +38,7 @@ struct SFTPFormDraft {
             self.user = cfg.user
             self.remotePath = cfg.remotePath
             self.authKind = cfg.authKind
+            self.sshAgentSocket = cfg.sshAgentSocket
         }
     }
 
@@ -76,7 +79,8 @@ struct SFTPFormDraft {
             name: name,
             backend: .sftp(SFTPConfig(
                 host: host, port: Int(port) ?? 22, user: user,
-                remotePath: remotePath, authKind: authKind
+                remotePath: remotePath, authKind: authKind,
+                sshAgentSocket: authKind == .sshAgent ? sshAgentSocket : nil
             )),
             mountProtocol: mountProtocol,
             autoMount: autoMount,
@@ -114,10 +118,23 @@ private struct SSHConfigPickerData: Identifiable {
     let hosts: [SSHConfigHost]
 }
 
+private enum ConnectionTestState: Equatable {
+    case idle
+    case running
+    case success(String)
+    case failure(String)
+}
+
+private enum AgentTestStatus: Equatable { case testing, working, failed }
+
 struct SFTPFormView: View {
     @Binding var draft: SFTPFormDraft
+    let rcloneBinary: URL
     @State private var showGenerateSheet = false
     @State private var sshConfigPickerData: SSHConfigPickerData? = nil
+    @State private var connectionTest: ConnectionTestState = .idle
+    @State private var agentCandidates: [SSHAgentCandidate] = []
+    @State private var agentStatuses: [String: AgentTestStatus] = [:]
 
     var body: some View {
         Form {
@@ -227,10 +244,74 @@ struct SFTPFormView: View {
                     }
                 case .sshAgent:
                     LabeledContent("Agent") {
-                        Text("Uses the system SSH agent (SSH_AUTH_SOCK).")
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            if agentCandidates.isEmpty {
+                                Text("Scanning for agents…")
+                                    .foregroundStyle(.secondary)
+                                    .font(.caption)
+                            } else {
+                                agentRow(name: "Auto (SSH_AUTH_SOCK)", hint: "Inherit from environment", socketPath: nil)
+                                Divider().padding(.vertical, 2)
+                                ForEach(sortedAgentCandidates) { c in
+                                    agentRow(name: c.name, hint: c.displayPath, socketPath: c.path)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
+            }
+
+            Section {
+                LabeledContent("") {
+                    HStack(spacing: 8) {
+                        Button {
+                            connectionTest = .idle
+                            Task { await runConnectionTest() }
+                        } label: {
+                            if connectionTest == .running {
+                                HStack(spacing: 6) {
+                                    ProgressView().controlSize(.small)
+                                    Text("Testing…")
+                                }
+                            } else {
+                                Text("Test Connection")
+                            }
+                        }
+                        .disabled(
+                            connectionTest == .running ||
+                            draft.host.trimmingCharacters(in: .whitespaces).isEmpty ||
+                            draft.user.trimmingCharacters(in: .whitespaces).isEmpty
+                        )
+                        Spacer()
+                        switch connectionTest {
+                        case .idle: EmptyView()
+                        case .running: EmptyView()
+                        case .success:
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        case .failure:
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
+                if case .success(let msg) = connectionTest {
+                    Text(msg)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if case .failure(let log) = connectionTest {
+                    ScrollView(.vertical) {
+                        Text(log)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 100)
+                }
+            } header: {
+                Text("Test")
             }
 
             Section("Mount") {
@@ -253,6 +334,259 @@ struct SFTPFormView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+        .task {
+            // Filesystem-only scan — fast, safe on main actor
+            agentCandidates = SSHAgentScanner.scan()
+            // Pre-select configured socket if it's still present
+            if let configured = draft.sshAgentSocket,
+               !agentCandidates.contains(where: { $0.path == configured }) {
+                draft.sshAgentSocket = nil
+            }
+        }
+    }
+
+    // MARK: - Agent picker helpers
+
+    private var sortedAgentCandidates: [SSHAgentCandidate] {
+        agentCandidates.sorted { a, b in
+            let aOk = agentStatuses[a.path] == .working
+            let bOk = agentStatuses[b.path] == .working
+            if aOk != bOk { return aOk }
+            return false
+        }
+    }
+
+    @ViewBuilder
+    private func agentRow(name: String, hint: String, socketPath: String?) -> some View {
+        let isSelected = draft.sshAgentSocket == socketPath
+        let status = socketPath.flatMap { agentStatuses[$0] }
+        Button { draft.sshAgentSocket = socketPath } label: {
+            HStack(spacing: 8) {
+                Image(systemName: isSelected ? "checkmark" : "")
+                    .frame(width: 14)
+                    .foregroundStyle(Color.accentColor)
+                    .font(.caption.bold())
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(name).fontWeight(isSelected ? .semibold : .regular)
+                    Text(hint).font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                agentStatusDot(status)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func agentStatusDot(_ status: AgentTestStatus?) -> some View {
+        switch status {
+        case .testing: ProgressView().controlSize(.mini)
+        case .working: Image(systemName: "circle.fill").foregroundStyle(.green).font(.caption2)
+        case .failed:  Image(systemName: "circle.fill").foregroundStyle(.secondary).font(.caption2)
+        case nil:      EmptyView()
+        }
+    }
+
+    private func runConnectionTest() async {
+        connectionTest = .running
+        let host = draft.host.trimmingCharacters(in: .whitespaces)
+        let port = Int(draft.port) ?? 22
+        let user = draft.user.trimmingCharacters(in: .whitespaces)
+
+        if draft.authKind == .sshAgent {
+            await runAgentTest(host: host, port: port, user: user)
+            return
+        }
+
+        let result: (Bool, String) = await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                switch draft.authKind {
+                case .password, .generatedKey:
+                    let p = Process()
+                    p.executableURL = URL(fileURLWithPath: "/usr/bin/nc")
+                    p.arguments = ["-z", "-w", "5", host, String(port)]
+                    p.standardOutput = Pipe(); p.standardError = Pipe()
+                    do { try p.run() } catch { cont.resume(returning: (false, error.localizedDescription)); return }
+                    p.waitUntilExit()
+                    if p.terminationStatus == 0 {
+                        cont.resume(returning: (true, "Port \(port) is reachable (auth not tested — \(draft.authKind == .password ? "password" : "generated key") requires a live connection)"))
+                    } else {
+                        cont.resume(returning: (false, "Cannot reach \(host):\(port) — check host and port"))
+                    }
+
+                case .keyFile:
+                    var args = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                "-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR",
+                                "-p", String(port)]
+                    if !draft.keyFilePath.isEmpty {
+                        args += ["-i", draft.keyFilePath, "-o", "IdentitiesOnly=yes"]
+                    }
+                    args += ["\(user)@\(host)", "echo __macsh_ok__"]
+                    let p = Process()
+                    p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+                    p.arguments = args
+                    p.environment = ProcessInfo.processInfo.environment
+                    let outPipe = Pipe(); let errPipe = Pipe()
+                    p.standardOutput = outPipe; p.standardError = errPipe
+                    do { try p.run() } catch { cont.resume(returning: (false, error.localizedDescription)); return }
+                    p.waitUntilExit()
+                    let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    guard out.contains("__macsh_ok__") else {
+                        let msg = err.trimmingCharacters(in: .whitespacesAndNewlines)
+                        cont.resume(returning: (false, msg.isEmpty ? "Exit code \(p.terminationStatus)" : msg))
+                        return
+                    }
+                    // SSH ok — now verify rclone
+                    let (rOk, rMsg) = Self.rcloneTest(
+                        rclone: rcloneBinary, socketPath: nil,
+                        host: host, port: port, user: user, authKind: .keyFile, keyFilePath: draft.keyFilePath
+                    )
+                    if rOk {
+                        cont.resume(returning: (true, "SSH ✓  rclone ✓  as \(user)@\(host):\(port)"))
+                    } else {
+                        cont.resume(returning: (false, "SSH ok, but rclone failed:\n\(rMsg)"))
+                    }
+
+                case .sshAgent: break  // handled above
+                }
+            }
+        }
+        connectionTest = result.0 ? .success(result.1) : .failure(result.1)
+    }
+
+    /// Tests every discovered agent against the server, marks statuses, sorts working
+    /// ones to the top, and auto-selects the first that authenticates successfully.
+    private func runAgentTest(host: String, port: Int, user: String) async {
+        let candidates = agentCandidates
+        guard !candidates.isEmpty else {
+            connectionTest = .failure("No SSH agents found. Is your password manager running?")
+            return
+        }
+
+        // Mark all as testing
+        for c in candidates { agentStatuses[c.path] = .testing }
+
+        var firstWorking: SSHAgentCandidate? = nil
+
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let group = DispatchGroup()
+                var workingPaths = Set<String>()
+                let lock = NSLock()
+
+                for candidate in candidates {
+                    group.enter()
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let ok = Self.sshTest(socketPath: candidate.path, host: host, port: port, user: user)
+                        lock.lock()
+                        if ok { workingPaths.insert(candidate.path) }
+                        lock.unlock()
+                        group.leave()
+                    }
+                }
+
+                group.wait()
+
+                // Update statuses and pick first working (preserving original order)
+                let winner = candidates.first { workingPaths.contains($0.path) }
+                DispatchQueue.main.sync {
+                    for c in candidates {
+                        agentStatuses[c.path] = workingPaths.contains(c.path) ? .working : .failed
+                    }
+                    firstWorking = winner
+                    if winner == nil {
+                        connectionTest = .failure("No agent could authenticate to \(host):\(port)")
+                    }
+                }
+
+                // Phase 2: verify rclone can also connect with the winning agent
+                if let winner {
+                    let rclone = rcloneBinary
+                    let (ok, msg) = Self.rcloneTest(
+                        rclone: rclone, socketPath: winner.path,
+                        host: host, port: port, user: user, authKind: .sshAgent, keyFilePath: ""
+                    )
+                    DispatchQueue.main.sync {
+                        draft.sshAgentSocket = winner.path
+                        if ok {
+                            connectionTest = .success("SSH ✓  rclone ✓  via \(winner.name) — \(user)@\(host):\(port)")
+                        } else {
+                            connectionTest = .failure("SSH ok via \(winner.name), but rclone failed:\n\(msg)")
+                        }
+                    }
+                }
+
+                cont.resume()
+            }
+        }
+        _ = firstWorking  // silence unused warning
+    }
+
+    private static func rcloneTest(
+        rclone: URL, socketPath: String?,
+        host: String, port: Int, user: String,
+        authKind: SFTPAuthKind, keyFilePath: String
+    ) -> (Bool, String) {
+        var lines = ["[r]", "type = sftp", "host = \(host)", "port = \(port)", "user = \(user)"]
+        switch authKind {
+        case .sshAgent:  lines.append("use_agent = true")
+        case .keyFile:   if !keyFilePath.isEmpty { lines.append("key_file = \(keyFilePath)") }
+        default: return (false, "rclone test not applicable for this auth method")
+        }
+        let configText = lines.joined(separator: "\n") + "\n"
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macsh-rclone-test-\(UUID().uuidString)")
+        guard (try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)) != nil else {
+            return (false, "Could not create temp dir")
+        }
+        let configURL = tmpDir.appendingPathComponent("rclone.conf")
+        guard (try? configText.write(to: configURL, atomically: true, encoding: .utf8)) != nil else {
+            return (false, "Could not write temp config")
+        }
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let p = Process()
+        p.executableURL = rclone
+        p.arguments = ["lsd", "--config", configURL.path, "r:",
+                       "--contimeout", "10s", "--timeout", "15s"]
+        var env = ProcessInfo.processInfo.environment
+        if let sock = socketPath { env["SSH_AUTH_SOCK"] = sock }
+        p.environment = env
+        let errPipe = Pipe()
+        p.standardOutput = Pipe()
+        p.standardError = errPipe
+        guard (try? p.run()) != nil else { return (false, "Failed to launch rclone") }
+        p.waitUntilExit()
+
+        if p.terminationStatus == 0 { return (true, "") }
+        let raw = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let msg = raw.split(separator: "\n")
+            .filter { $0.contains("CRITICAL") || $0.contains("ERROR") }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (false, msg.isEmpty ? "rclone exit \(p.terminationStatus)" : msg)
+    }
+
+    private static func sshTest(socketPath: String, host: String, port: Int, user: String) -> Bool {
+        let args = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                    "-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR",
+                    "-o", "IdentitiesOnly=yes",
+                    "-p", String(port), "\(user)@\(host)", "echo __macsh_ok__"]
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        p.arguments = args
+        var env = ProcessInfo.processInfo.environment
+        env["SSH_AUTH_SOCK"] = socketPath
+        p.environment = env
+        let outPipe = Pipe()
+        p.standardOutput = outPipe
+        p.standardError = Pipe()
+        guard (try? p.run()) != nil else { return false }
+        p.waitUntilExit()
+        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return out.contains("__macsh_ok__")
     }
 }
 
