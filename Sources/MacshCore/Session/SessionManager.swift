@@ -58,12 +58,20 @@ public final class SessionManager: ObservableObject {
     /// SIGKILL/crash — without this, every relaunch would pile up `<name>-1`,
     /// `<name>-2`, … entries in /Volumes since NetFS auto-numbers collisions.
     public func autoMountAll() {
-        for session in sessions {
-            let volname = mounter.volumeName(from: session.remote.name)
-            mounter.reconcileStaleMount(volumeName: volname)
-        }
-        for session in sessions where session.remote.autoMount {
-            scheduleMount(remoteID: session.id, attempt: 0)
+        let mounter = self.mounter
+        let volnames = sessions.map { mounter.volumeName(from: $0.remote.name) }
+        let autoMountIDs = sessions.filter { $0.remote.autoMount }.map { $0.id }
+        Task { @MainActor [weak self] in
+            // Reconcile all stale mounts in parallel, off the main actor.
+            await withTaskGroup(of: Void.self) { group in
+                for volname in volnames {
+                    group.addTask { await mounter.reconcileStaleMount(volumeName: volname) }
+                }
+            }
+            guard let self else { return }
+            for id in autoMountIDs {
+                self.scheduleMount(remoteID: id, attempt: 0)
+            }
         }
     }
 
@@ -207,7 +215,7 @@ public final class SessionManager: ObservableObject {
                 )
                 if sftp.authKind == .password, let p = password {
                     envOverrides[RcloneConfigBuilder.passwordEnvVar(remoteID: remote.id)] =
-                        try RcloneProcess.obscure(plaintext: p, binary: rcloneBinary)
+                        try await RcloneProcess.obscure(plaintext: p, binary: rcloneBinary)
                 }
                 // ssh-keyscan runs off the main actor — no UI blocking
                 if let verifier = hostKeyVerifier {
@@ -230,7 +238,7 @@ public final class SessionManager: ObservableObject {
                 }
                 bundle.ftp = FTPSecrets(password: password)
                 envOverrides[RcloneConfigBuilder.passwordEnvVar(remoteID: remote.id)] =
-                    try RcloneProcess.obscure(plaintext: password, binary: rcloneBinary)
+                    try await RcloneProcess.obscure(plaintext: password, binary: rcloneBinary)
                 remotePath = ftp.remotePath
             }
 

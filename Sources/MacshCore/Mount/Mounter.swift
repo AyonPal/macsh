@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 import NetFS
 
-public final class Mounter {
+public final class Mounter: @unchecked Sendable {
     public enum MountError: LocalizedError {
         case mountpointCreationFailed(String)
         case mountFailed(stderr: String, exitCode: Int32)
@@ -104,15 +104,20 @@ public final class Mounter {
         return candidate
     }
 
-    /// If `/Volumes/<volname>` is currently mounted from a `http://127.0.0.1:<port>/...`
-    /// source (the shape macsh produces), unmount it and SIGTERM the orphan rclone
-    /// process listening on that port. Returns true if anything was reconciled.
-    ///
-    /// Called at app launch before `autoMountAll` so a prior macsh instance that
-    /// died via SIGKILL/crash doesn't produce duplicate `/Volumes/<name>-1`,
-    /// `<name>-2` mounts on every subsequent launch.
+    /// Async variant — runs the subprocess calls on a background thread so the
+    /// main actor is never blocked. Called at app launch from `autoMountAll`.
     @discardableResult
-    public func reconcileStaleMount(volumeName: String) -> Bool {
+    public func reconcileStaleMount(volumeName: String) async -> Bool {
+        await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                cont.resume(returning: self.reconcileStaleMountSync(volumeName: volumeName))
+            }
+        }
+    }
+
+    /// Synchronous core — safe to call on any thread; never call from main actor.
+    @discardableResult
+    private func reconcileStaleMountSync(volumeName: String) -> Bool {
         guard let port = staleLocalhostPort(forVolume: volumeName) else { return false }
         try? unmount(mountpoint: "/Volumes/\(volumeName)")
         killRcloneOnPort(port)
