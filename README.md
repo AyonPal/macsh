@@ -1,3 +1,5 @@
+
+
 <div align="center">
 
 <img src="docs/icon.png" alt="macsh" width="128" height="128">
@@ -64,7 +66,7 @@ your first remote.
 
 |              | `macsh`                       | `macsh-lite`                 |
 | ------------ | ----------------------------- | ---------------------------- |
-| **DMG size** | ~32 MB                        | ~800 KB                      |
+| **DMG size** | ~32 MB                        | ~600 KB                      |
 | **rclone**   | bundled inside the app        | uses your `brew install rclone` |
 | **Best for** | "just works" install          | smaller download / power users |
 
