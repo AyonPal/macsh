@@ -170,7 +170,11 @@ public final class Mounter {
     }
 
     /// Calls `diskutil unmount <mountpoint>`. Falls back to `unmount force` on failure.
+    ///
+    /// Unmounting something that is already gone (ejected in Finder, rclone killed, mount
+    /// cleaned up by another run) is a success, not an error.
     public func unmount(mountpoint: String) throws {
+        guard isMounted(mountpoint: mountpoint) else { return }
         do {
             try run(
                 "/usr/sbin/diskutil",
@@ -183,6 +187,22 @@ public final class Mounter {
                 args: ["unmount", "force", mountpoint],
                 failure: MountError.unmountFailed
             )
+        }
+    }
+
+    /// True when `mountpoint` appears as a mount target in `/sbin/mount` output.
+    public func isMounted(mountpoint: String) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/sbin/mount")
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        do { try p.run() } catch { return true }   // can't tell: let diskutil decide
+        p.waitUntilExit()
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let resolved = URL(fileURLWithPath: mountpoint).resolvingSymlinksInPath().path
+        return text.split(separator: "\n").contains { line in
+            line.contains(" on \(mountpoint) (") || line.contains(" on \(resolved) (")
         }
     }
 
