@@ -200,6 +200,12 @@ public final class SessionManager: ObservableObject {
                     privateKeyPath: resolvedKeyPath,
                     keyPassphrase: try keychain.get(remoteID: remote.id, kind: .keyPassphrase)
                 )
+                if sftp.authKind == .keyFile, let pp = bundle.sftp?.keyPassphrase, !pp.isEmpty {
+                    // Without this, passphrase-protected keys fail with
+                    // "ssh: this private key is passphrase protected".
+                    envOverrides[RcloneConfigBuilder.keyPassphraseEnvVar] =
+                        try RcloneProcess.obscure(plaintext: pp, binary: rcloneBinary)
+                }
                 if sftp.authKind == .password, let p = password {
                     envOverrides[RcloneConfigBuilder.passwordEnvVar(remoteID: remote.id)] =
                         try RcloneProcess.obscure(plaintext: p, binary: rcloneBinary)
