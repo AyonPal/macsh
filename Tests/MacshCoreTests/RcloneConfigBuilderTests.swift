@@ -44,4 +44,40 @@ final class RcloneConfigBuilderTests: XCTestCase {
             sftpSecrets: SFTPSecrets(password: nil, privateKeyPath: nil, keyPassphrase: nil)
         ))
     }
+
+    func testKeyPassphraseIsNeverWrittenToConfig() throws {
+        let r = Remote(
+            id: UUID(),
+            name: "h",
+            backend: .sftp(SFTPConfig(host: "h", port: 22, user: "u", remotePath: "/", authKind: .keyFile)),
+            mountProtocol: .webdav, autoMount: false
+        )
+        let secrets = SFTPSecrets(password: nil, privateKeyPath: "/tmp/k", keyPassphrase: "s3cret-pass")
+        let cfg = try RcloneConfigBuilder.build(remote: r, sftpSecrets: secrets)
+        XCTAssertFalse(cfg.contains("s3cret-pass"))
+    }
+
+    func testKeyPassphraseEnvVarName() {
+        // rclone reads RCLONE_CONFIG_<SECTION>_KEY_FILE_PASS and expects the obscured form.
+        XCTAssertEqual(RcloneConfigBuilder.keyPassphraseEnvVar, "RCLONE_CONFIG_R_KEY_FILE_PASS")
+    }
+
+    func testObscuredPassphraseDiffersFromPlaintextAndRevealsBack() throws {
+        let rclone = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("App/macsh/Resources/rclone")
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: rclone.path),
+                          "bundled rclone not fetched (run scripts/fetch-rclone.sh)")
+        let obscured = try RcloneProcess.obscure(plaintext: "s3cret-pass", binary: rclone)
+        XCTAssertFalse(obscured.isEmpty)
+        XCTAssertNotEqual(obscured, "s3cret-pass")
+        let p = Process()
+        p.executableURL = rclone
+        p.arguments = ["reveal", obscured]
+        let out = Pipe(); p.standardOutput = out
+        try p.run(); p.waitUntilExit()
+        let revealed = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(revealed, "s3cret-pass")
+    }
 }

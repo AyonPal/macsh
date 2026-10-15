@@ -23,7 +23,13 @@ public final class Mounter {
         }
     }
 
-    public init() {}
+    private let mountBase: URL
+
+    /// `mountBase` is where NFS mountpoints are created; defaults to `~/macsh`.
+    public init(mountBase: URL? = nil) {
+        self.mountBase = mountBase
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("macsh", isDirectory: true)
+    }
 
     /// Strips characters that can't appear in a macOS volume name (`/`, `:`, NULs)
     /// but otherwise leaves the user's chosen name alone. NetFS uses the URL path as
@@ -80,7 +86,7 @@ public final class Mounter {
     /// shape and option keys differ from the WebDAV path — left as a follow-up.
     public func mountNFS(host: String, port: Int, exportPath: String, name: String, mountpoint: String) throws {
         let source = "\(host):\(exportPath)"
-        let opts = "vers=3,tcp,port=\(port),mountport=\(port),nolocks,locallocks,soft,timeo=30,nfc,rsize=131072,wsize=131072"
+        let opts = "vers=3,tcp,noresvport,port=\(port),mountport=\(port),nolocks,locallocks,soft,timeo=30,nfc,rsize=1048576,wsize=1048576"
         try run(
             "/sbin/mount_nfs",
             args: ["-o", opts, source, mountpoint],
@@ -88,12 +94,24 @@ public final class Mounter {
         )
     }
 
+    /// NFS mounts go through `mount_nfs`, which runs as the user and so can't create
+    /// folders in the root-owned `/Volumes`. Mount into a user-owned folder instead:
+    /// `~/macsh/<name>`. A leftover empty directory from a previous mount is reused;
+    /// a directory that is a live mount or has content gets a `-2`, `-3`, ... suffix.
     public func resolveMountpoint(name: String) throws -> String {
         let fm = FileManager.default
-        var candidate = "/Volumes/\(name)"
+        let base = mountBase
+        do {
+            try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        } catch {
+            throw MountError.mountpointCreationFailed(error.localizedDescription)
+        }
+        var candidate = base.appendingPathComponent(name).path
         var counter = 2
         while fm.fileExists(atPath: candidate) {
-            candidate = "/Volumes/\(name)-\(counter)"
+            let contents = (try? fm.contentsOfDirectory(atPath: candidate)) ?? ["?"]
+            if contents.isEmpty && !isMountPoint(candidate) { return candidate }
+            candidate = base.appendingPathComponent("\(name)-\(counter)").path
             counter += 1
         }
         do {
@@ -102,6 +120,14 @@ public final class Mounter {
             throw MountError.mountpointCreationFailed(error.localizedDescription)
         }
         return candidate
+    }
+
+    /// True when `path` is on a different device than its parent directory.
+    private func isMountPoint(_ path: String) -> Bool {
+        var a = stat(), b = stat()
+        let parent = (path as NSString).deletingLastPathComponent
+        guard stat(path, &a) == 0, stat(parent, &b) == 0 else { return false }
+        return a.st_dev != b.st_dev
     }
 
     /// If `/Volumes/<volname>` is currently mounted from a `http://127.0.0.1:<port>/...`
@@ -170,7 +196,11 @@ public final class Mounter {
     }
 
     /// Calls `diskutil unmount <mountpoint>`. Falls back to `unmount force` on failure.
+    ///
+    /// Unmounting something that is already gone (ejected in Finder, rclone killed, mount
+    /// cleaned up by another run) is a success, not an error.
     public func unmount(mountpoint: String) throws {
+        guard isMounted(mountpoint: mountpoint) else { return }
         do {
             try run(
                 "/usr/sbin/diskutil",
@@ -183,6 +213,22 @@ public final class Mounter {
                 args: ["unmount", "force", mountpoint],
                 failure: MountError.unmountFailed
             )
+        }
+    }
+
+    /// True when `mountpoint` appears as a mount target in `/sbin/mount` output.
+    public func isMounted(mountpoint: String) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/sbin/mount")
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        do { try p.run() } catch { return true }   // can't tell: let diskutil decide
+        p.waitUntilExit()
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let resolved = URL(fileURLWithPath: mountpoint).resolvingSymlinksInPath().path
+        return text.split(separator: "\n").contains { line in
+            line.contains(" on \(mountpoint) (") || line.contains(" on \(resolved) (")
         }
     }
 

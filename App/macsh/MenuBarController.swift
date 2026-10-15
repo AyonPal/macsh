@@ -98,6 +98,7 @@ final class MenuBarController {
         switch session.status {
         case .idle: dot = "○"
         case .starting: dot = "◐"
+        case .stopping: dot = "◑"
         case .mounted: dot = "●"
         case .failed: dot = "✕"
         }
@@ -110,8 +111,9 @@ final class MenuBarController {
         Task { @MainActor in
             do {
                 switch session.status {
-                case .mounted: try manager.unmount(remoteID: id)
-                default: try manager.mount(remoteID: id)
+                case .starting, .stopping: return        // already working on it
+                case .mounted: try await manager.unmount(remoteID: id)
+                default: try await manager.mount(remoteID: id)
                 }
             } catch {
                 NSAlert(error: error).runModal()

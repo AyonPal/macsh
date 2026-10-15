@@ -26,20 +26,16 @@ public final class RcloneProcess {
     /// Writes `configText` to a temp file, picks a free localhost port, generates random local creds,
     /// and starts `rclone serve webdav <remoteName>:<remotePath> --addr 127.0.0.1:<port> --user <u> --pass <p>`.
     /// `passwordEnvValue` (if non-nil) is set as `passwordEnvName` for the child so rclone can use it for SFTP auth.
-    /// rclone serve flags that make remote-side changes appear quickly. Default rclone
-    /// caches dir listings for 5 minutes, which feels broken for personal sync use.
-    private static let liveUpdateArgs = ["--dir-cache-time", "10s", "--vfs-fast-fingerprint"]
-
     public func spawnWebDAVServe(
         remoteName: String,
         remotePath: String,
         configText: String,
         baseurl: String,
         liveUpdates: Bool,
+        tuning: TransferTuning = .defaults(for: .webdav),
         envOverrides: [String: String] = [:]
     ) throws -> Spawned {
-        var extra = ["--vfs-cache-mode", "writes", "--baseurl", baseurl]
-        if liveUpdates { extra.append(contentsOf: Self.liveUpdateArgs) }
+        let extra = ["--baseurl", baseurl] + tuning.serveArgs(liveUpdates: liveUpdates)
         return try spawn(
             serveSubcommand: "webdav",
             extraServeArgs: extra,
@@ -58,10 +54,10 @@ public final class RcloneProcess {
         remotePath: String,
         configText: String,
         liveUpdates: Bool,
+        tuning: TransferTuning = .defaults(for: .nfs),
         envOverrides: [String: String] = [:]
     ) throws -> Spawned {
-        var extra = ["--vfs-cache-mode", "writes"]
-        if liveUpdates { extra.append(contentsOf: Self.liveUpdateArgs) }
+        let extra = tuning.serveArgs(liveUpdates: liveUpdates)
         return try spawn(
             serveSubcommand: "nfs",
             extraServeArgs: extra,

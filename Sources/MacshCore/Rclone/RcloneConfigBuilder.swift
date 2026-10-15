@@ -115,6 +115,12 @@ public enum RcloneConfigBuilder {
         "RCLONE_CONFIG_\(sectionName.uppercased())_PASS"
     }
 
+    /// Env var name rclone uses to override the SFTP `key_file_pass` field at runtime.
+    /// The value must be in rclone's obscured form (`rclone obscure`), like `pass`.
+    public static var keyPassphraseEnvVar: String {
+        "RCLONE_CONFIG_\(sectionName.uppercased())_KEY_FILE_PASS"
+    }
+
     /// Env var name for S3 secret access key.
     public static func s3SecretEnvVar(remoteID: UUID) -> String {
         "RCLONE_CONFIG_\(sectionName.uppercased())_SECRET_ACCESS_KEY"
