@@ -90,6 +90,10 @@ private struct TabButton: View {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(selected ? Color.accentColor.opacity(0.12) : Color.clear)
             )
+            // `.plain` buttons only hit-test painted pixels (icon glyph, text). Without an
+            // explicit shape, clicks in the gap or padding of an unselected tab (clear
+            // background) fall through and do nothing.
+            .contentShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
     }
