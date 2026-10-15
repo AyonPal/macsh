@@ -28,6 +28,8 @@ struct AddRemoteView: View {
     @State private var s3: S3FormDraft
     @State private var ftp: FTPFormDraft
     @State private var error: String?
+    @State private var customizeTuning: Bool
+    @State private var tuning: TransferTuning
 
     init(manager: SessionManager, prefs: UserPreferences, editing: Remote? = nil) {
         self.manager = manager
@@ -50,6 +52,9 @@ struct AddRemoteView: View {
             }
         }
         _kind = State(initialValue: initialKind)
+        let proto = editing?.mountProtocol ?? prefs.defaultProtocol
+        _customizeTuning = State(initialValue: editing?.tuning != nil)
+        _tuning = State(initialValue: editing?.tuning ?? .defaults(for: proto))
         _sftp = State(initialValue: sftpDraft)
         _s3 = State(initialValue: s3Draft)
         _ftp = State(initialValue: ftpDraft)
@@ -57,18 +62,29 @@ struct AddRemoteView: View {
 
     private var isEditing: Bool { editingRemote != nil }
 
+    private var currentProtocol: MountProtocol {
+        switch kind {
+        case .sftp: return sftp.mountProtocol
+        case .s3:   return s3.mountProtocol
+        case .ftp:  return ftp.mountProtocol
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
             ScrollView {
-                form
-                    .padding(20)
+                VStack(alignment: .leading, spacing: 0) {
+                    form
+                    TuningSection(customize: $customizeTuning, tuning: $tuning, mountProtocol: currentProtocol)
+                }
+                .padding(20)
             }
             Divider()
             footer
         }
-        .frame(width: 560, height: 540)
+        .frame(width: 560, height: 620)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -117,21 +133,26 @@ struct AddRemoteView: View {
     }
 
     private func save() {
+        if customizeTuning, let v = tuning.validate() { error = v; return }
+        let chosenTuning: TransferTuning? = customizeTuning ? tuning : nil
         do {
             switch kind {
             case .sftp:
                 if let v = sftp.validate() { error = v; return }
-                let (remote, secrets) = sftp.toRemoteAndSecrets()
+                var (remote, secrets) = sftp.toRemoteAndSecrets()
+                remote.tuning = chosenTuning
                 if isEditing { try manager.update(remote, sftpSecrets: secrets) }
                 else { try manager.add(remote, sftpSecrets: secrets) }
             case .s3:
                 if let v = s3.validate() { error = v; return }
-                let (remote, secrets) = s3.toRemoteAndSecrets()
+                var (remote, secrets) = s3.toRemoteAndSecrets()
+                remote.tuning = chosenTuning
                 if isEditing { try manager.update(remote, s3Secrets: secrets) }
                 else { try manager.add(remote, s3Secrets: secrets) }
             case .ftp:
                 if let v = ftp.validate() { error = v; return }
-                let (remote, secrets) = ftp.toRemoteAndSecrets()
+                var (remote, secrets) = ftp.toRemoteAndSecrets()
+                remote.tuning = chosenTuning
                 if isEditing { try manager.update(remote, ftpSecrets: secrets) }
                 else { try manager.add(remote, ftpSecrets: secrets) }
             }

@@ -234,6 +234,7 @@ public final class SessionManager: ObservableObject {
                 knownHostsPath: hostKeyVerifier?.knownHostsPath
             )
             let logURL = logsDir.appendingPathComponent("\(remote.id.uuidString).log")
+            let tuning = remote.tuning ?? .defaults(for: remote.mountProtocol)
             let runner = RcloneProcess(binary: rcloneBinary, logFile: logURL)
             let volname = mounter.volumeName(from: remote.name)
             let spawned: RcloneProcess.Spawned
@@ -245,6 +246,7 @@ public final class SessionManager: ObservableObject {
                     configText: configText,
                     baseurl: "/\(volname)",
                     liveUpdates: remote.liveUpdates,
+                    tuning: tuning,
                     envOverrides: envOverrides
                 )
             case .nfs:
@@ -253,6 +255,7 @@ public final class SessionManager: ObservableObject {
                     remotePath: remotePath,
                     configText: configText,
                     liveUpdates: remote.liveUpdates,
+                    tuning: tuning,
                     envOverrides: envOverrides
                 )
             }

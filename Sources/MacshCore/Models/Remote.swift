@@ -7,6 +7,8 @@ public struct Remote: Codable, Equatable, Identifiable {
     public var mountProtocol: MountProtocol
     public var autoMount: Bool
     public var liveUpdates: Bool
+    /// nil = `TransferTuning.defaults(for: mountProtocol)`.
+    public var tuning: TransferTuning?
 
     public init(
         id: UUID,
@@ -14,7 +16,8 @@ public struct Remote: Codable, Equatable, Identifiable {
         backend: Backend,
         mountProtocol: MountProtocol,
         autoMount: Bool,
-        liveUpdates: Bool = true
+        liveUpdates: Bool = true,
+        tuning: TransferTuning? = nil
     ) {
         self.id = id
         self.name = name
@@ -22,10 +25,11 @@ public struct Remote: Codable, Equatable, Identifiable {
         self.mountProtocol = mountProtocol
         self.autoMount = autoMount
         self.liveUpdates = liveUpdates
+        self.tuning = tuning
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, backend, mountProtocol, autoMount, liveUpdates
+        case id, name, backend, mountProtocol, autoMount, liveUpdates, tuning
     }
 
     public init(from decoder: Decoder) throws {
@@ -37,6 +41,7 @@ public struct Remote: Codable, Equatable, Identifiable {
         self.autoMount = try c.decode(Bool.self, forKey: .autoMount)
         // Pre-existing remotes.json files predate this field; default to live (matches the form default).
         self.liveUpdates = try c.decodeIfPresent(Bool.self, forKey: .liveUpdates) ?? true
+        self.tuning = try c.decodeIfPresent(TransferTuning.self, forKey: .tuning)
     }
 }
 
