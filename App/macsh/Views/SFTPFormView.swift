@@ -49,7 +49,7 @@ struct SFTPFormDraft {
         case .password:
             if password.isEmpty && !isEditing { return "Password required" }
         case .keyFile:
-            if keyFilePath.isEmpty { return "Key file required" }
+            if keyFilePath.isEmpty && !isEditing { return "Key file required" }
         case .generatedKey:
             // On edit, the existing key in keychain stays unless user regenerates.
             if generatedKeyPair == nil && !isEditing { return "Generate the key first" }

@@ -166,6 +166,12 @@ public final class SessionManager: ObservableObject {
         try reload()
     }
 
+    /// Key file path saved for a `.keyFile` SFTP remote (a path, not a secret), so edit
+    /// forms can show it instead of asking for it again.
+    public func storedKeyFilePath(for remoteID: UUID) -> String? {
+        (try? keychain.get(remoteID: remoteID, kind: .privateKey)) ?? nil
+    }
+
     public func mount(remoteID: UUID) throws {
         guard let session = sessions.first(where: { $0.id == remoteID }) else { return }
         session.transition(to: .starting)

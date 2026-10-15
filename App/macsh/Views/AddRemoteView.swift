@@ -45,6 +45,9 @@ struct AddRemoteView: View {
         if let r = editing {
             switch r.backend {
             case .sftp: initialKind = .sftp; sftpDraft = SFTPFormDraft(editing: r)
+                if sftpDraft.authKind == .keyFile, let path = manager.storedKeyFilePath(for: r.id) {
+                    sftpDraft.keyFilePath = path
+                }
             case .s3:   initialKind = .s3;   s3Draft   = S3FormDraft(editing: r)
             case .ftp:  initialKind = .ftp;  ftpDraft  = FTPFormDraft(editing: r)
             }
