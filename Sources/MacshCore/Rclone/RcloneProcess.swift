@@ -60,7 +60,16 @@ public final class RcloneProcess {
         liveUpdates: Bool,
         envOverrides: [String: String] = [:]
     ) throws -> Spawned {
-        var extra = ["--vfs-cache-mode", "writes"]
+        // NFS issues many small reads; without a read cache each becomes its own SFTP
+        // round trip (measured 2.5 MB/s with `writes` vs ~17 MB/s with `full` + read-ahead).
+        // `--vfs-write-back 1s` starts uploads after 1s instead of rclone's 5s default.
+        var extra = [
+            "--vfs-cache-mode", "full",
+            "--vfs-cache-max-size", "5G",
+            "--vfs-read-ahead", "128M",
+            "--buffer-size", "32M",
+            "--vfs-write-back", "1s",
+        ]
         if liveUpdates { extra.append(contentsOf: Self.liveUpdateArgs) }
         return try spawn(
             serveSubcommand: "nfs",
