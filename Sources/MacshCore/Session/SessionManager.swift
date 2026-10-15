@@ -171,6 +171,7 @@ public final class SessionManager: ObservableObject {
         session.transition(to: .starting)
 
         let remote = session.remote
+        let logFile = logsDir.appendingPathComponent("\(remote.id.uuidString).log")
         var ephemeralKeyURL: URL? = nil
         var envOverrides: [String: String] = [:]
         var bundle = BackendSecrets()
@@ -280,7 +281,10 @@ public final class SessionManager: ObservableObject {
             session.transition(to: .mounted(at: mountpoint))
         } catch {
             if let url = ephemeralKeyURL { try? FileManager.default.removeItem(at: url) }
-            session.transition(to: .failed(reason: String(describing: error)))
+            var reason = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+            // rclone's own explanation (bad key, auth failure, ...) only goes to its log.
+            if let tail = Self.logTail(of: logFile) { reason += "\n" + tail }
+            session.transition(to: .failed(reason: reason))
             throw error
         }
     }
@@ -316,6 +320,15 @@ public final class SessionManager: ObservableObject {
 
     public func logURL(for remoteID: UUID) -> URL {
         logsDir.appendingPathComponent("\(remoteID.uuidString).log")
+    }
+
+    /// Last `lines` non-empty lines of an rclone log, or nil if it is missing/empty.
+    static func logTail(of url: URL, lines: Int = 3) -> String? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let tail = text.split(separator: "\n").map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .suffix(lines)
+        return tail.isEmpty ? nil : tail.joined(separator: "\n")
     }
 
     private func waitForPort(_ port: Int, timeout: TimeInterval) throws {

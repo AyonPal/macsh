@@ -16,10 +16,23 @@ public protocol HostKeyPrompter: AnyObject {
     func confirmChange(host: String, port: Int, oldFingerprint: String, newFingerprint: String) -> Bool
 }
 
-public enum HostKeyError: Error {
+public enum HostKeyError: Error, LocalizedError {
     case keyscanFailed(stderr: String)
     case rejectedByUser
     case fingerprintComputationFailed
+
+    public var errorDescription: String? {
+        switch self {
+        case .keyscanFailed(let stderr):
+            let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "Could not read the server's host key (ssh-keyscan failed)"
+                + (detail.isEmpty ? ". The server may be unreachable or not answering SSH." : ": \(detail)")
+        case .rejectedByUser:
+            return "Host key was not accepted"
+        case .fingerprintComputationFailed:
+            return "Could not compute the host key fingerprint"
+        }
+    }
 }
 
 @MainActor
