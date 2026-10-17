@@ -11,14 +11,17 @@ final class MenuBarController {
     private var statusItem: NSStatusItem!
     private var cancellables = Set<AnyCancellable>()
     private var addWindow: NSWindow?
+    private var importWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var editWindows: [UUID: NSWindow] = [:]
     private var logWindows: [UUID: NSWindow] = [:]
+    private let updater: UpdateController
 
     init(manager: SessionManager, loginItemManager: LoginItemManager, prefs: UserPreferences) {
         self.manager = manager
         self.loginItemManager = loginItemManager
         self.prefs = prefs
+        self.updater = UpdateController(prefs: prefs)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             if let icon = NSImage(named: "MenuBarIcon") {
@@ -34,6 +37,7 @@ final class MenuBarController {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.rebuildMenu() }
             .store(in: &cancellables)
+        updater.checkInBackgroundIfDue()
     }
 
     private func rebuildMenu() {
@@ -77,6 +81,9 @@ final class MenuBarController {
         let add = NSMenuItem(title: "Add remote…", action: #selector(showAdd), keyEquivalent: "n")
         add.target = self
         menu.addItem(add)
+        let importItem = NSMenuItem(title: "Import from rclone…", action: #selector(showImport), keyEquivalent: "")
+        importItem.target = self
+        menu.addItem(importItem)
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -98,6 +105,7 @@ final class MenuBarController {
         switch session.status {
         case .idle: dot = "○"
         case .starting: dot = "◐"
+        case .stopping: dot = "◑"
         case .mounted: dot = "●"
         case .failed: dot = "✕"
         }
@@ -110,8 +118,9 @@ final class MenuBarController {
         Task { @MainActor in
             do {
                 switch session.status {
-                case .mounted: try manager.unmount(remoteID: id)
-                default: try manager.mount(remoteID: id)
+                case .starting, .stopping: return        // already working on it
+                case .mounted: try await manager.unmount(remoteID: id)
+                default: try await manager.mount(remoteID: id)
                 }
             } catch {
                 NSAlert(error: error).runModal()
@@ -185,9 +194,21 @@ final class MenuBarController {
         Self.present(addWindow)
     }
 
+    @objc private func showImport() {
+        // Rebuilt each time so it re-reads rclone.conf and starts with a clean selection.
+        let view = ImportRemotesView(manager: manager, prefs: prefs)
+        let host = NSHostingController(rootView: view)
+        let win = NSWindow(contentViewController: host)
+        win.title = "Import from rclone"
+        win.styleMask = [.titled, .closable]
+        win.isReleasedWhenClosed = false
+        importWindow = win
+        Self.present(importWindow)
+    }
+
     @objc private func showSettings() {
         if settingsWindow == nil {
-            let view = SettingsView(loginItemManager: loginItemManager, prefs: prefs)
+            let view = SettingsView(loginItemManager: loginItemManager, prefs: prefs, onCheckForUpdates: { [weak self] in self?.updater.checkNow() })
             let host = NSHostingController(rootView: view)
             let win = NSWindow(contentViewController: host)
             win.title = "Settings"
@@ -211,61 +232,6 @@ final class MenuBarController {
     }
 
     @objc private func checkForUpdates() {
-        let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
-        let url = URL(string: "https://api.github.com/repos/AyonPal/macsh/releases/latest")!
-        var req = URLRequest(url: url)
-        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        URLSession.shared.dataTask(with: req) { data, _, error in
-            Task { @MainActor in
-                if let error {
-                    Self.showUpdateAlert(title: "Couldn't check for updates", message: error.localizedDescription, style: .warning)
-                    return
-                }
-                guard let data,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let tag = json["tag_name"] as? String else {
-                    Self.showUpdateAlert(title: "Couldn't check for updates", message: "Unexpected response from GitHub.", style: .warning)
-                    return
-                }
-                let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-                let pageURL = (json["html_url"] as? String).flatMap(URL.init(string:))
-                    ?? URL(string: "https://github.com/AyonPal/macsh/releases/latest")!
-                if Self.compareVersions(current, latest) < 0 {
-                    let alert = NSAlert()
-                    alert.messageText = "Update available"
-                    alert.informativeText = "You're on \(current). \(latest) is out."
-                    alert.addButton(withTitle: "Open release page")
-                    alert.addButton(withTitle: "Later")
-                    if alert.runModal() == .alertFirstButtonReturn {
-                        NSWorkspace.shared.open(pageURL)
-                    }
-                } else {
-                    Self.showUpdateAlert(title: "You're up to date", message: "macsh \(current) is the latest version.", style: .informational)
-                }
-            }
-        }.resume()
-    }
-
-    private static func showUpdateAlert(title: String, message: String, style: NSAlert.Style) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = style
-        alert.runModal()
-    }
-
-    /// Compares dotted numeric version strings ("0.1.2" vs "0.1.10"). Non-numeric
-    /// suffixes are ignored. Returns -1, 0, or 1.
-    private static func compareVersions(_ a: String, _ b: String) -> Int {
-        let parse: (String) -> [Int] = { s in
-            s.split(separator: ".").map { Int($0.prefix(while: \.isNumber)) ?? 0 }
-        }
-        let lhs = parse(a), rhs = parse(b)
-        for i in 0..<max(lhs.count, rhs.count) {
-            let l = i < lhs.count ? lhs[i] : 0
-            let r = i < rhs.count ? rhs[i] : 0
-            if l != r { return l < r ? -1 : 1 }
-        }
-        return 0
+        updater.checkNow()
     }
 }

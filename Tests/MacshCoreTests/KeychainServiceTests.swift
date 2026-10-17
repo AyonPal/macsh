@@ -31,3 +31,21 @@ final class KeychainServiceTests: XCTestCase {
         XCTAssertNil(try svc.get(remoteID: id, kind: .password))
     }
 }
+
+final class KeychainOptionKindTests: XCTestCase {
+    func testOptionSecretsAreStoredPerNameAndRemote() throws {
+        let svc = KeychainService(serviceName: "macsh.tests.\(UUID().uuidString)")
+        let id = UUID()
+        defer {
+            try? svc.delete(remoteID: id, kind: .option("pass"))
+            try? svc.delete(remoteID: id, kind: .option("token"))
+        }
+        try svc.set(remoteID: id, kind: .option("pass"), value: "a")
+        try svc.set(remoteID: id, kind: .option("token"), value: "b")
+        XCTAssertEqual(try svc.get(remoteID: id, kind: .option("pass")), "a")
+        XCTAssertEqual(try svc.get(remoteID: id, kind: .option("token")), "b")
+        XCTAssertNil(try svc.get(remoteID: id, kind: .password))
+        try svc.delete(remoteID: id, kind: .option("pass"))
+        XCTAssertNil(try svc.get(remoteID: id, kind: .option("pass")))
+    }
+}

@@ -11,6 +11,8 @@ public final class RemoteSession: ObservableObject, Identifiable {
     /// For generated-key remotes, the temp file containing the decrypted private key
     /// while the mount is active. Cleaned up on unmount.
     public internal(set) var ephemeralKeyURL: URL?
+    /// rclone's temporary config while mounted; read back for refreshed OAuth tokens.
+    public internal(set) var rcloneConfigURL: URL?
 
     public var id: UUID { remote.id }
 

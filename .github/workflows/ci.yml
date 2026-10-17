@@ -1,0 +1,242 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # the new-code coverage gate diffs against the base branch
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Script tests (scripts/bench-mount.py)
+        run: python3 -m unittest discover -s scripts/tests -v
+
+      - name: Build
+        run: swift build
+
+      - name: DMG verifier tests (scripts/verify-dmg.sh)
+        run: python3 -m unittest discover -s scripts/tests -v
+
+      - name: Test with coverage
+        run: swift test --enable-code-coverage
+
+      - name: Coverage report
+        run: |
+          PROFDATA="$(swift test --show-codecov-path | xargs dirname)/default.profdata"
+          BUNDLE="$(find .build -name 'MacshCorePackageTests.xctest' -maxdepth 6 | head -1)"
+          BIN="$BUNDLE/Contents/MacOS/MacshCorePackageTests"
+          xcrun llvm-cov report "$BIN" -instr-profile "$PROFDATA" \
+            -ignore-filename-regex '\.build|Tests' | tee coverage.txt
+          {
+            echo '### Test coverage'
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.txt
+
+      # Rule: in a PR, at least 80% of the changed lines under Sources/ must be covered by the
+      # unit tests above. UI code in App/ is not part of the package, so keep logic in MacshCore.
+      - name: New-code coverage gate (>= 80%)
+        if: github.event_name == 'pull_request'
+        run: |
+          PROFDATA="$(swift test --show-codecov-path | xargs dirname)/default.profdata"
+          BUNDLE="$(find .build -name 'MacshCorePackageTests.xctest' -maxdepth 6 | head -1)"
+          BIN="$BUNDLE/Contents/MacOS/MacshCorePackageTests"
+          xcrun llvm-cov export -format=lcov "$BIN" -instr-profile "$PROFDATA" \
+            -ignore-filename-regex '\.build|Tests' | sed "s#SF:$PWD/#SF:#" > coverage.lcov
+          python3 -m venv .diffcover
+          .diffcover/bin/pip install --quiet 'diff-cover>=9,<10'
+          set +e
+          .diffcover/bin/diff-cover coverage.lcov --compare-branch="origin/${{ github.base_ref }}" \
+            --fail-under=80 --markdown-report diff-coverage.md
+          status=$?
+          set -e
+          {
+            echo '### New-code coverage (rule: at least 80% of changed lines in Sources/)'
+            cat diff-coverage.md
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request' && always()
+        with:
+          name: diff-coverage
+          path: diff-coverage.md
+          if-no-files-found: ignore
+
+  # Real Nextcloud (native PHP + SQLite; containers can't run on Apple Silicon runners)
+  # driven through macsh's actual WebDAV backend, rclone and macOS mounts.
+  nextcloud-integration:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Nextcloud
+        run: ./scripts/ci/start-nextcloud.sh
+
+      - name: Nextcloud round-trip tests (NFS and WebDAV mounts)
+        run: |
+          set -o pipefail
+          swift test --filter NextcloudIntegrationTests 2>&1 | tee it.log
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          tail -n 50 "$RUNNER_TEMP/nextcloud-it/server.log" || true
+          tail -n 50 "$RUNNER_TEMP"/nextcloud-it/data/nextcloud.log || true
+          mount | grep -i -E "macsh|127.0.0.1" || true
+
+      - name: Failure digest
+        if: failure()
+        run: grep -E "error:|failed \(" it.log | grep -v warning | cut -c1-1200 || true
+
+  # SFTP (asyncssh, password + key auth), FTP, S3 and SMB servers on localhost, driven through
+  # macsh's real pipeline with NFS and WebDAV mounts.
+  backends-integration:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start SFTP, FTP and S3 servers
+        run: ./scripts/ci/start-backends.sh
+
+      - name: Backend round-trip tests
+        run: |
+          set -o pipefail
+          swift test --filter BackendIntegrationTests 2>&1 | tee it.log
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          tail -n 40 /tmp/macsh-it/sshd.log || true
+          tail -n 5 /tmp/macsh-it/ftp.log /tmp/macsh-it/s3.log /tmp/macsh-it/smb.log || true
+          tail -n 15 /tmp/macsh-it/samba/log.* 2>/dev/null || true
+          mount | grep -i -E "macsh|127.0.0.1" || true
+
+      - name: Failure digest
+        if: failure()
+        run: grep -E "error:|failed \(" it.log | grep -v warning | cut -c1-1200 || true
+
+  # Azure Blob against Azurite (Microsoft's emulator), plus the raw-options escape hatch.
+  azure-integration:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Azurite
+        run: ./scripts/ci/start-azurite.sh
+
+      - name: Azure round-trip tests (NFS and WebDAV mounts)
+        run: |
+          set -o pipefail
+          swift test --filter AzureIntegrationTests 2>&1 | tee it.log
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          tail -n 30 /tmp/macsh-azurite/azurite.log || true
+          mount | grep -i -E "macsh|127.0.0.1" || true
+
+      - name: Failure digest
+        if: failure()
+        run: grep -E "error:|failed \(" it.log | grep -v warning | cut -c1-1200 || true
+
+  # Real Backblaze B2 / Google Cloud Storage. No emulator exists for B2's native API, so these need
+  # test accounts: repository secrets MACSH_IT_B2_ACCOUNT/_KEY/_BUCKET and MACSH_IT_GCS_CREDENTIALS/
+  # _BUCKET (optional _PROJECT). Without them the tests skip.
+  native-cloud-integration:
+    runs-on: macos-14
+    timeout-minutes: 20
+    env:
+      MACSH_IT_B2_ACCOUNT: ${{ secrets.MACSH_IT_B2_ACCOUNT }}
+      MACSH_IT_B2_KEY: ${{ secrets.MACSH_IT_B2_KEY }}
+      MACSH_IT_B2_BUCKET: ${{ secrets.MACSH_IT_B2_BUCKET }}
+      MACSH_IT_GCS_CREDENTIALS: ${{ secrets.MACSH_IT_GCS_CREDENTIALS }}
+      MACSH_IT_GCS_BUCKET: ${{ secrets.MACSH_IT_GCS_BUCKET }}
+      MACSH_IT_GCS_PROJECT: ${{ secrets.MACSH_IT_GCS_PROJECT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for test accounts
+        run: |
+          [ -n "$MACSH_IT_B2_KEY" ] || echo "::warning::MACSH_IT_B2_* secrets not set - Backblaze B2 test skipped"
+          [ -n "$MACSH_IT_GCS_CREDENTIALS" ] || echo "::warning::MACSH_IT_GCS_* secrets not set - Google Cloud Storage test skipped"
+
+      - name: Install rclone
+        if: env.MACSH_IT_B2_KEY != '' || env.MACSH_IT_GCS_CREDENTIALS != ''
+        run: brew install rclone
+
+      - name: B2 and GCS round-trip tests
+        if: env.MACSH_IT_B2_KEY != '' || env.MACSH_IT_GCS_CREDENTIALS != ''
+        run: swift test --filter NativeCloudAccountTests
+
+  # Real Google Drive. Needs a test account: add the repository secret MACSH_IT_GDRIVE_TOKEN
+  # (output of `rclone authorize drive`; optionally MACSH_IT_GDRIVE_CLIENT_ID/_CLIENT_SECRET and
+  # MACSH_IT_GDRIVE_FOLDER). Without it the tests skip, and PRs from forks never get secrets.
+  gdrive-integration:
+    runs-on: macos-14
+    timeout-minutes: 20
+    env:
+      MACSH_IT_GDRIVE_TOKEN: ${{ secrets.MACSH_IT_GDRIVE_TOKEN }}
+      MACSH_IT_GDRIVE_CLIENT_ID: ${{ secrets.MACSH_IT_GDRIVE_CLIENT_ID }}
+      MACSH_IT_GDRIVE_CLIENT_SECRET: ${{ secrets.MACSH_IT_GDRIVE_CLIENT_SECRET }}
+      MACSH_IT_GDRIVE_FOLDER: ${{ secrets.MACSH_IT_GDRIVE_FOLDER }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for test account
+        run: |
+          if [ -z "$MACSH_IT_GDRIVE_TOKEN" ]; then
+            echo "::warning::MACSH_IT_GDRIVE_TOKEN secret not set - Google Drive integration tests are skipped"
+          fi
+
+      - name: Install rclone
+        if: env.MACSH_IT_GDRIVE_TOKEN != ''
+        run: brew install rclone
+
+      - name: Google Drive round-trip and token refresh tests
+        if: env.MACSH_IT_GDRIVE_TOKEN != ''
+        run: swift test --filter GoogleDriveIntegrationTests
+
+  # Compiles the SwiftUI app (macsh-lite shares all sources with macsh). The package tests do
+  # not build App/, so without this a broken view only shows up in the post-merge release run.
+  app-build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: cd App && xcodegen generate
+
+      - name: Build the app (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project App/macsh.xcodeproj -scheme macsh-lite -configuration Debug \
+            -derivedDataPath App/build CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO build 2>&1 | tee xcodebuild.log | grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
+          grep -q "BUILD SUCCEEDED" xcodebuild.log

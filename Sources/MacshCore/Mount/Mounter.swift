@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 import NetFS
 
-public final class Mounter {
+public class Mounter {
     public enum MountError: LocalizedError {
         case mountpointCreationFailed(String)
         case mountFailed(stderr: String, exitCode: Int32)
@@ -23,7 +23,13 @@ public final class Mounter {
         }
     }
 
-    public init() {}
+    private let mountBase: URL
+
+    /// `mountBase` is where NFS mountpoints are created; defaults to `~/macsh`.
+    public init(mountBase: URL? = nil) {
+        self.mountBase = mountBase
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("macsh", isDirectory: true)
+    }
 
     /// Strips characters that can't appear in a macOS volume name (`/`, `:`, NULs)
     /// but otherwise leaves the user's chosen name alone. NetFS uses the URL path as
@@ -78,9 +84,15 @@ public final class Mounter {
     /// Defaults: NFSv3, no root squash, locallocks, vers=3 (rclone serve nfs default).
     /// NFS still goes through the legacy exec path; NetFS supports NFS too but the URL
     /// shape and option keys differ from the WebDAV path — left as a follow-up.
+    /// `timeo` is in tenths of a second: 60 s per attempt. The old 3 s made a cloud listing
+    /// that takes a few seconds look like a dead server ("Server connections interrupted").
+    static func nfsMountOptions(port: Int) -> String {
+        "vers=3,tcp,noresvport,port=\(port),mountport=\(port),nolocks,locallocks,soft,timeo=600,retrans=2,nfc,rsize=1048576,wsize=1048576"
+    }
+
     public func mountNFS(host: String, port: Int, exportPath: String, name: String, mountpoint: String) throws {
         let source = "\(host):\(exportPath)"
-        let opts = "vers=3,tcp,port=\(port),mountport=\(port),nolocks,locallocks,soft,timeo=30,nfc,rsize=131072,wsize=131072"
+        let opts = Self.nfsMountOptions(port: port)
         try run(
             "/sbin/mount_nfs",
             args: ["-o", opts, source, mountpoint],
@@ -88,12 +100,24 @@ public final class Mounter {
         )
     }
 
+    /// NFS mounts go through `mount_nfs`, which runs as the user and so can't create
+    /// folders in the root-owned `/Volumes`. Mount into a user-owned folder instead:
+    /// `~/macsh/<name>`. A leftover empty directory from a previous mount is reused;
+    /// a directory that is a live mount or has content gets a `-2`, `-3`, ... suffix.
     public func resolveMountpoint(name: String) throws -> String {
         let fm = FileManager.default
-        var candidate = "/Volumes/\(name)"
+        let base = mountBase
+        do {
+            try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        } catch {
+            throw MountError.mountpointCreationFailed(error.localizedDescription)
+        }
+        var candidate = base.appendingPathComponent(name).path
         var counter = 2
         while fm.fileExists(atPath: candidate) {
-            candidate = "/Volumes/\(name)-\(counter)"
+            let contents = (try? fm.contentsOfDirectory(atPath: candidate)) ?? ["?"]
+            if contents.isEmpty && !isMountPoint(candidate) { return candidate }
+            candidate = base.appendingPathComponent("\(name)-\(counter)").path
             counter += 1
         }
         do {
@@ -102,6 +126,94 @@ public final class Mounter {
             throw MountError.mountpointCreationFailed(error.localizedDescription)
         }
         return candidate
+    }
+
+    /// True when `path` is on a different device than its parent directory.
+    private func isMountPoint(_ path: String) -> Bool {
+        var a = stat(), b = stat()
+        let parent = (path as NSString).deletingLastPathComponent
+        guard stat(path, &a) == 0, stat(parent, &b) == 0 else { return false }
+        return a.st_dev != b.st_dev
+    }
+
+    /// A mount macsh created: NFS under the mount base, or WebDAV from a localhost rclone.
+    public struct LocalMount: Equatable {
+        public enum Kind { case nfs, webdav }
+        public let path: String
+        public let kind: Kind
+        /// Port of the `rclone serve` behind it, when it can be determined.
+        public let port: Int?
+    }
+
+    /// Parses `/sbin/mount` and `nfsstat -m` output for mounts served by a local rclone
+    /// whose mountpoint is under `mountBase` (NFS) or that come from `http://127.0.0.1:<port>/`.
+    /// `mount` does not show NFS ports, so those come from `nfsstat -m`.
+    static func parseLocalMounts(mountOutput: String, nfsstatOutput: String, mountBase: String) -> [LocalMount] {
+        var nfsPorts: [String: Int] = [:]
+        var current: String?
+        for line in nfsstatOutput.split(separator: "\n", omittingEmptySubsequences: false) {
+            if let r = line.range(of: " from 127.0.0.1:") {
+                current = String(line[..<r.lowerBound])
+            } else if let path = current, nfsPorts[path] == nil, let r = line.range(of: #"(?<![a-z])port=(\d+)"#, options: .regularExpression) {
+                nfsPorts[path] = Int(line[r].dropFirst("port=".count))
+            }
+        }
+        var result: [LocalMount] = []
+        let base = mountBase.hasSuffix("/") ? mountBase : mountBase + "/"
+        for line in mountOutput.split(separator: "\n") {
+            guard let on = line.range(of: " on "), let paren = line.range(of: " (", range: on.upperBound..<line.endIndex) else { continue }
+            let source = String(line[..<on.lowerBound])
+            let path = String(line[on.upperBound..<paren.lowerBound])
+            let fsType = line[paren.upperBound...].prefix { $0 != "," && $0 != ")" }
+            if fsType == "nfs", source.hasPrefix("127.0.0.1:"), path.hasPrefix(base) {
+                result.append(LocalMount(path: path, kind: .nfs, port: nfsPorts[path]))
+            } else if fsType == "webdav", source.hasPrefix("http://127.0.0.1:") {
+                let after = source.dropFirst("http://127.0.0.1:".count)
+                result.append(LocalMount(path: path, kind: .webdav, port: Int(after.prefix { $0.isNumber })))
+            }
+        }
+        return result
+    }
+
+    /// Mounts currently on this machine that look like ours (see `parseLocalMounts`).
+    public func currentLocalMounts() -> [LocalMount] {
+        Self.parseLocalMounts(
+            mountOutput: Self.output(of: "/sbin/mount", []),
+            nfsstatOutput: Self.output(of: "/usr/bin/nfsstat", ["-m"]),
+            mountBase: mountBase.path
+        )
+    }
+
+    /// At launch nothing is mounted by *this* process, so any NFS mount of a local rclone
+    /// under the mount base is a leftover from a previous run (app killed, rclone killed,
+    /// crash). Left alone it makes macOS show "Server connections interrupted" and makes
+    /// the next mount pick `<name>-2`, `<name>-3`, ... Unmount it, stop its rclone and
+    /// remove the empty folder. Returns the mountpoints that were cleaned up.
+    @discardableResult
+    public func reconcileLeftoverNFSMounts() -> [String] {
+        var cleaned: [String] = []
+        for m in currentLocalMounts() where m.kind == .nfs {
+            try? forceUnmount(mountpoint: m.path)
+            if let port = m.port { killRcloneOnPort(port) }
+            if !isMounted(mountpoint: m.path) {
+                rmdir(m.path)    // POSIX rmdir: only removes an empty directory
+                cleaned.append(m.path)
+            }
+        }
+        return cleaned
+    }
+
+    private static func output(of exe: String, _ args: [String]) -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        p.arguments = args
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        do { try p.run() } catch { return "" }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     /// If `/Volumes/<volname>` is currently mounted from a `http://127.0.0.1:<port>/...`
@@ -151,7 +263,7 @@ public final class Mounter {
     /// Per-port matching keeps this safe for users (especially of macsh-lite) who may
     /// have other rclone processes running unrelated to macsh.
     private func killRcloneOnPort(_ port: Int) {
-        let pattern = "rclone serve webdav.*--addr 127.0.0.1:\(port)"
+        let pattern = "rclone serve (webdav|nfs).*--addr 127.0.0.1:\(port)( |$)"
         let pgrep = Process()
         pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         pgrep.arguments = ["-f", pattern]
@@ -170,7 +282,11 @@ public final class Mounter {
     }
 
     /// Calls `diskutil unmount <mountpoint>`. Falls back to `unmount force` on failure.
+    ///
+    /// Unmounting something that is already gone (ejected in Finder, rclone killed, mount
+    /// cleaned up by another run) is a success, not an error.
     public func unmount(mountpoint: String) throws {
+        guard isMounted(mountpoint: mountpoint) else { return }
         do {
             try run(
                 "/usr/sbin/diskutil",
@@ -183,6 +299,28 @@ public final class Mounter {
                 args: ["unmount", "force", mountpoint],
                 failure: MountError.unmountFailed
             )
+        }
+    }
+
+    /// `diskutil unmount force`, for mounts whose server is gone. No-op if not mounted.
+    public func forceUnmount(mountpoint: String) throws {
+        guard isMounted(mountpoint: mountpoint) else { return }
+        try run("/usr/sbin/diskutil", args: ["unmount", "force", mountpoint], failure: MountError.unmountFailed)
+    }
+
+    /// True when `mountpoint` appears as a mount target in `/sbin/mount` output.
+    public func isMounted(mountpoint: String) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/sbin/mount")
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        do { try p.run() } catch { return true }   // can't tell: let diskutil decide
+        p.waitUntilExit()
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let resolved = URL(fileURLWithPath: mountpoint).resolvingSymlinksInPath().path
+        return text.split(separator: "\n").contains { line in
+            line.contains(" on \(mountpoint) (") || line.contains(" on \(resolved) (")
         }
     }
 

@@ -15,8 +15,19 @@ struct MacshApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var menuBar: MenuBarController?
     var loginItemManager: LoginItemManager?
+    private var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // `kill`/`pkill`, logout and shell Ctrl-C send SIGTERM/SIGINT. Without a handler the
+        // process dies without running applicationWillTerminate, leaving dead mounts behind
+        // ("Server connections interrupted"). Route them through the normal quit path.
+        for sig in [SIGTERM, SIGINT] {
+            signal(sig, SIG_IGN)
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            src.setEventHandler { NSApp.terminate(nil) }
+            src.resume()
+            signalSources.append(src)
+        }
         do {
             let bundleID = Bundle.main.bundleIdentifier ?? "ai.macsh"
             let supportDir = try AppPaths.applicationSupport(bundleID: bundleID)

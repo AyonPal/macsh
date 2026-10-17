@@ -1,13 +1,23 @@
 import Foundation
 import Security
 
-public enum SecretKind: String {
-    case password
-    case keyPassphrase
-    case privateKey
-    case localServePassword
-    case s3AccessKeyID
-    case s3SecretAccessKey
+/// Which secret of a remote a Keychain item holds. A struct (not an enum) so generic
+/// backends can store one item per rclone option via `.option(_:)`.
+public struct SecretKind: RawRepresentable, Hashable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+
+    public static let password = SecretKind(rawValue: "password")
+    public static let keyPassphrase = SecretKind(rawValue: "keyPassphrase")
+    public static let privateKey = SecretKind(rawValue: "privateKey")
+    public static let localServePassword = SecretKind(rawValue: "localServePassword")
+    public static let s3AccessKeyID = SecretKind(rawValue: "s3AccessKeyID")
+    public static let s3SecretAccessKey = SecretKind(rawValue: "s3SecretAccessKey")
+
+    /// Secret rclone option of a generic backend (e.g. WebDAV `pass`).
+    public static func option(_ name: String) -> SecretKind {
+        SecretKind(rawValue: "option.\(name)")
+    }
 }
 
 public enum KeychainError: Error, Equatable {

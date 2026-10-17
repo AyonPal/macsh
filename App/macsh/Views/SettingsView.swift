@@ -10,14 +10,16 @@ import MacshCore
 struct SettingsView: View {
     let loginItemManager: LoginItemManager
     let prefs: UserPreferences
+    let onCheckForUpdates: () -> Void
 
     enum Tab: String, CaseIterable, Identifiable {
-        case general, rclone, about
+        case general, rclone, updates, about
         var id: String { rawValue }
         var label: String {
             switch self {
             case .general: return "General"
             case .rclone:  return "rclone"
+            case .updates: return "Updates"
             case .about:   return "About"
             }
         }
@@ -25,6 +27,7 @@ struct SettingsView: View {
             switch self {
             case .general: return "gearshape"
             case .rclone:  return "shippingbox"
+            case .updates: return "arrow.down.circle"
             case .about:   return "info.circle"
             }
         }
@@ -63,6 +66,7 @@ struct SettingsView: View {
         switch selection {
         case .general: GeneralPane(loginItemManager: loginItemManager, prefs: prefs)
         case .rclone:  RclonePane(prefs: prefs)
+        case .updates: UpdatesPane(prefs: prefs, onCheck: onCheckForUpdates)
         case .about:   AboutPane()
         }
     }
@@ -90,6 +94,10 @@ private struct TabButton: View {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(selected ? Color.accentColor.opacity(0.12) : Color.clear)
             )
+            // `.plain` buttons only hit-test painted pixels (icon glyph, text). Without an
+            // explicit shape, clicks in the gap or padding of an unselected tab (clear
+            // background) fall through and do nothing.
+            .contentShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
     }
@@ -216,6 +224,69 @@ private struct RclonePane: View {
     }
 }
 
+// MARK: - Updates
+
+private struct UpdatesPane: View {
+    let prefs: UserPreferences
+    let onCheck: () -> Void
+    @State private var channel: UpdateChannel
+    @State private var autoCheck: Bool
+
+    init(prefs: UserPreferences, onCheck: @escaping () -> Void) {
+        self.prefs = prefs
+        self.onCheck = onCheck
+        _channel = State(initialValue: prefs.updateChannel)
+        _autoCheck = State(initialValue: prefs.autoCheckUpdates)
+    }
+
+    private var running: String {
+        let b = BuildInfo.current
+        return b.isDevBuild ? "macsh \(b.version) (local build)" : "macsh \(b.version) (\(b.shortSHA))"
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Channel") {
+                    Picker("", selection: $channel) {
+                        ForEach(UpdateChannel.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 280)
+                    .onChange(of: channel) { _, c in
+                        prefs.updateChannel = c
+                        prefs.skippedUpdateTag = nil
+                    }
+                }
+                Text(channel == .stable
+                     ? "Tagged releases (v0.1.3, ...): tested and announced."
+                     : "A build of every change merged to main: newest features, less tested.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                LabeledContent("Automatic") {
+                    Toggle("Check once a day", isOn: $autoCheck)
+                        .toggleStyle(.checkbox)
+                        .onChange(of: autoCheck) { _, on in prefs.autoCheckUpdates = on }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                LabeledContent("Running") {
+                    Text(running).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                LabeledContent(" ") {
+                    Button("Check for updates…", action: onCheck)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } header: {
+                Text("Software updates")
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+    }
+}
+
 // MARK: - About
 
 private struct AboutPane: View {
@@ -242,6 +313,9 @@ private struct AboutPane: View {
                 .foregroundStyle(.secondary)
             Link("github.com/AyonPal/macsh",
                  destination: URL(string: "https://github.com/AyonPal/macsh")!)
+                .font(.caption)
+            Link("Updates from github.com/\(UpdateChecker.defaultRepo)",
+                 destination: URL(string: "https://github.com/\(UpdateChecker.defaultRepo)/releases")!)
                 .font(.caption)
             Spacer()
             Text("Released under the Apache License 2.0.")

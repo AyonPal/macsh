@@ -49,7 +49,11 @@ struct SFTPFormDraft {
         case .password:
             if password.isEmpty && !isEditing { return "Password required" }
         case .keyFile:
-            if keyFilePath.isEmpty { return "Key file required" }
+            if keyFilePath.isEmpty {
+                if !isEditing { return "Key file required" }   // blank on edit keeps the saved one
+            } else if let problem = KeyFileValidator.validate(path: keyFilePath) {
+                return problem
+            }
         case .generatedKey:
             // On edit, the existing key in keychain stays unless user regenerates.
             if generatedKeyPair == nil && !isEditing { return "Generate the key first" }

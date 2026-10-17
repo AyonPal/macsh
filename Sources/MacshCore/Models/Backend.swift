@@ -4,6 +4,8 @@ public enum Backend: Codable, Equatable {
     case sftp(SFTPConfig)
     case s3(S3Config)
     case ftp(FTPConfig)
+    /// Any rclone backend described by data (see `BackendDescriptor`), e.g. WebDAV.
+    case rclone(RcloneBackendConfig)
 }
 
 public struct FTPConfig: Codable, Equatable {

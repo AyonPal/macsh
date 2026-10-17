@@ -7,6 +7,8 @@ public final class RcloneProcess {
         public let port: Int
         public let user: String
         public let password: String
+        /// The temporary rclone config; rclone may rewrite it (e.g. refreshed OAuth tokens).
+        public let configURL: URL
     }
 
     public enum SpawnError: Error {
@@ -26,20 +28,17 @@ public final class RcloneProcess {
     /// Writes `configText` to a temp file, picks a free localhost port, generates random local creds,
     /// and starts `rclone serve webdav <remoteName>:<remotePath> --addr 127.0.0.1:<port> --user <u> --pass <p>`.
     /// `passwordEnvValue` (if non-nil) is set as `passwordEnvName` for the child so rclone can use it for SFTP auth.
-    /// rclone serve flags that make remote-side changes appear quickly. Default rclone
-    /// caches dir listings for 5 minutes, which feels broken for personal sync use.
-    private static let liveUpdateArgs = ["--dir-cache-time", "10s", "--vfs-fast-fingerprint"]
-
     public func spawnWebDAVServe(
         remoteName: String,
         remotePath: String,
         configText: String,
         baseurl: String,
         liveUpdates: Bool,
-        envOverrides: [String: String] = [:]
+        tuning: TransferTuning = .defaults(for: .webdav),
+        envOverrides: [String: String] = [:],
+        extraArgs: [String] = []
     ) throws -> Spawned {
-        var extra = ["--vfs-cache-mode", "writes", "--baseurl", baseurl]
-        if liveUpdates { extra.append(contentsOf: Self.liveUpdateArgs) }
+        let extra = ["--baseurl", baseurl] + tuning.serveArgs(liveUpdates: liveUpdates) + extraArgs
         return try spawn(
             serveSubcommand: "webdav",
             extraServeArgs: extra,
@@ -58,10 +57,11 @@ public final class RcloneProcess {
         remotePath: String,
         configText: String,
         liveUpdates: Bool,
-        envOverrides: [String: String] = [:]
+        tuning: TransferTuning = .defaults(for: .nfs),
+        envOverrides: [String: String] = [:],
+        extraArgs: [String] = []
     ) throws -> Spawned {
-        var extra = ["--vfs-cache-mode", "writes"]
-        if liveUpdates { extra.append(contentsOf: Self.liveUpdateArgs) }
+        let extra = tuning.serveArgs(liveUpdates: liveUpdates) + extraArgs
         return try spawn(
             serveSubcommand: "nfs",
             extraServeArgs: extra,
@@ -118,7 +118,7 @@ public final class RcloneProcess {
         do { try process.run() }
         catch { throw SpawnError.launchFailed(error) }
 
-        return Spawned(process: process, port: port, user: user, password: password)
+        return Spawned(process: process, port: port, user: user, password: password, configURL: configURL)
     }
 
     /// Runs `rclone obscure <plaintext>` and returns the obscured form. rclone's env-var
@@ -135,6 +135,32 @@ public final class RcloneProcess {
         p.waitUntilExit()
         let data = out.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    public enum RevealError: Error, LocalizedError {
+        case failed(String)
+        public var errorDescription: String? {
+            if case .failed(let m) = self { return m.isEmpty ? "rclone reveal failed" : m }
+            return nil
+        }
+    }
+
+    /// Runs `rclone reveal <obscured>` and returns the plaintext (the inverse of `obscure`).
+    public static func reveal(obscured: String, binary: URL) throws -> String {
+        let p = Process()
+        p.executableURL = binary
+        p.arguments = ["reveal", obscured]
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        try p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        let errData = err.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else {
+            throw RevealError.failed(String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .newlines)
     }
 
     private static func findFreePort() throws -> Int {
