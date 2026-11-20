@@ -3,7 +3,7 @@ import Foundation
 enum LogArchive {
     static func rotate(
         current: URL,
-        retention: TimeInterval = 30 * 24 * 3600,
+        retention: TimeInterval = 14 * 24 * 3600,
         now: Date = Date(),
         fileManager: FileManager = .default
     ) {
