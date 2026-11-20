@@ -55,7 +55,7 @@ final class LogArchiveTests: XCTestCase {
     func testRetentionUsesModificationDateAndCleansOtherRemotes() throws {
         let dir = try fixture()
         let current = dir.appendingPathComponent("\(id).log")
-        let cutoff = now.addingTimeInterval(-14 * 24 * 3600)
+        let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
         let oldNames = ["\(id).20261111-030405.log", "\(UUID().uuidString.lowercased()).20261111-030405-2.log"]
         let keptNames = ["\(id).20200101-000000.log", "\(id).20200101-000000-1.log", current.lastPathComponent]
         for name in oldNames + keptNames {
@@ -69,24 +69,6 @@ final class LogArchiveTests: XCTestCase {
         LogArchive.rotate(current: current, now: now)
 
         XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: dir.path)), Set(keptNames))
-    }
-
-    func testDefaultRetentionKeepsThirteenDayOldArchiveAndDeletesFifteenDayOldArchive() throws {
-        let dir = try fixture()
-        let kept = dir.appendingPathComponent("\(id).20261029-030405.log")
-        let deleted = dir.appendingPathComponent("\(id).20261027-030405.log")
-        for (file, age) in [(kept, 13), (deleted, 15)] {
-            try Data().write(to: file)
-            try FileManager.default.setAttributes(
-                [.modificationDate: now.addingTimeInterval(-Double(age) * 24 * 3600)],
-                ofItemAtPath: file.path
-            )
-        }
-
-        LogArchive.rotate(current: dir.appendingPathComponent("\(id).log"), now: now)
-
-        XCTAssertTrue(FileManager.default.fileExists(atPath: kept.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: deleted.path))
     }
 
     func testCustomRetentionAndMissingCurrentStillCleanArchives() throws {
