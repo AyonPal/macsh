@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   build-test:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -85,7 +85,7 @@ jobs:
   # Real Nextcloud (native PHP + SQLite; containers can't run on Apple Silicon runners)
   # driven through rmount's actual WebDAV backend, rclone and macOS mounts.
   nextcloud-integration:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -112,7 +112,7 @@ jobs:
   # SFTP (asyncssh, password + key auth), FTP, S3 and SMB servers on localhost, driven through
   # rmount's real pipeline with NFS and WebDAV mounts.
   backends-integration:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -139,7 +139,7 @@ jobs:
 
   # Azure Blob against Azurite (Microsoft's emulator), plus the raw-options escape hatch.
   azure-integration:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -166,7 +166,7 @@ jobs:
   # test accounts: repository secrets RMOUNT_IT_B2_ACCOUNT/_KEY/_BUCKET and RMOUNT_IT_GCS_CREDENTIALS/
   # _BUCKET (optional _PROJECT). Without them the tests skip. The old MACSH_IT_* secret names still work.
   native-cloud-integration:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
     env:
       RMOUNT_IT_B2_ACCOUNT: ${{ secrets.RMOUNT_IT_B2_ACCOUNT || secrets.MACSH_IT_B2_ACCOUNT }}
@@ -195,7 +195,7 @@ jobs:
   # (output of `rclone authorize drive`; optionally RMOUNT_IT_GDRIVE_CLIENT_ID/_CLIENT_SECRET and
   # RMOUNT_IT_GDRIVE_FOLDER). Without it the tests skip, and PRs from forks never get secrets.
   gdrive-integration:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
     env:
       RMOUNT_IT_GDRIVE_TOKEN: ${{ secrets.RMOUNT_IT_GDRIVE_TOKEN || secrets.MACSH_IT_GDRIVE_TOKEN }}
