@@ -1,6 +1,20 @@
 import XCTest
 @testable import RMountCore
 
+@MainActor
+private func waitUntil(
+    timeout: TimeInterval = 5,
+    pollInterval: TimeInterval = 0.01,
+    _ condition: () async -> Bool
+) async throws -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if await condition() { return true }
+        try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+    }
+    return await condition()
+}
+
 private final class ControlURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (Int, Data))?
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -122,22 +136,30 @@ final class UploadMonitorTests: XCTestCase {
         XCTAssertEqual(UploadMonitor.Intervals().delay(for: pending.status), 2.5)
         XCTAssertEqual(UploadMonitor.Intervals().delay(for: UploadStatus()), 15)
         let monitor = UploadMonitor(client: client, intervals: intervals) { statuses.append($0) }
-        try await Task.sleep(nanoseconds: 60_000_000)
+        let sawPendingPolls = try await waitUntil {
+            await client.calls > 2
+        }
+        XCTAssertTrue(sawPendingPolls, "Expected multiple polls while uploads were pending")
         let pendingCalls = await client.calls
         XCTAssertGreaterThan(pendingCalls, 2)
         await client.setQueue(VFSQueue())
-        try await Task.sleep(nanoseconds: 30_000_000)
+        let sawIdleStatus = try await waitUntil {
+            statuses.last == UploadStatus()
+        }
+        XCTAssertTrue(sawIdleStatus, "Expected the monitor to report an idle queue")
         let idleCalls = await client.calls
-        try await Task.sleep(nanoseconds: 40_000_000)
+        try await Task.sleep(nanoseconds: 300_000_000)
         let stillIdleCalls = await client.calls
-        XCTAssertEqual(idleCalls, stillIdleCalls)
-        XCTAssertEqual(statuses.last, UploadStatus())
+        XCTAssertLessThanOrEqual(stillIdleCalls - idleCalls, 2, "Idle polling should be near the configured 0.15 second interval")
         await client.setFails()
-        try await Task.sleep(nanoseconds: 160_000_000)
+        let sawFailedPoll = try await waitUntil {
+            await client.calls > stillIdleCalls
+        }
+        XCTAssertTrue(sawFailedPoll, "Expected another poll after the client began failing")
         XCTAssertEqual(statuses.last, UploadStatus())
         monitor.stop()
         let stoppedCalls = await client.calls
-        try await Task.sleep(nanoseconds: 170_000_000)
+        try await Task.sleep(nanoseconds: 300_000_000)
         let finalCalls = await client.calls
         XCTAssertEqual(stoppedCalls, finalCalls)
     }
