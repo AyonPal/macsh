@@ -15,6 +15,7 @@ struct RMountApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var menuBar: MenuBarController?
     var loginItemManager: LoginItemManager?
+    private var checkingTermination = false
     private var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -63,6 +64,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.runModal()
             NSApp.terminate(nil)
         }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let menuBar else { return .terminateNow }
+        guard !checkingTermination else { return .terminateLater }
+        checkingTermination = true
+        Task { @MainActor in
+            let shouldQuit = await menuBar.confirmQuit()
+            checkingTermination = false
+            sender.reply(toApplicationShouldTerminate: shouldQuit)
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {

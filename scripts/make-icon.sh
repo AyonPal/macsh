@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerates the app icon (App/rmount/Resources/AppIcon.icns), docs/icon.png and the menu bar images
-# (App/rmount/Resources/MenuBarIcon.png and @2x) from the drawing
+# (MenuBarIcon and MenuBarIconUploading, at 1x and 2x) from the drawing
 # in scripts/make-icon.swift. macOS only (AppKit, iconutil).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -30,4 +30,6 @@ cp "$work/256.png" docs/icon.png
 # Menu bar template glyph, 18 pt at 1x and 2x.
 draw 18 App/rmount/Resources/MenuBarIcon.png menubar
 draw 36 App/rmount/Resources/MenuBarIcon@2x.png menubar
+draw 18 App/rmount/Resources/MenuBarIconUploading.png menubar-uploading
+draw 36 App/rmount/Resources/MenuBarIconUploading@2x.png menubar-uploading
 echo "wrote AppIcon.icns, docs/icon.png and the MenuBarIcon images"
