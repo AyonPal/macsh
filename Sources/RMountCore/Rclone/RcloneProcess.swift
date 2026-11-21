@@ -110,6 +110,7 @@ public final class RcloneProcess {
         for (k, v) in envOverrides { env[k] = v }
         process.environment = env
 
+        LogArchive.rotate(current: logFile)
         FileManager.default.createFile(atPath: logFile.path, contents: nil)
         let logHandle = try FileHandle(forWritingTo: logFile)
         process.standardOutput = logHandle
