@@ -43,6 +43,12 @@ targets:
       - path: rmount/Resources/MenuBarIcon@2x.png
         buildPhase: resources
         type: file
+      - path: rmount/Resources/MenuBarIconUploading.png
+        buildPhase: resources
+        type: file
+      - path: rmount/Resources/MenuBarIconUploading@2x.png
+        buildPhase: resources
+        type: file
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.rmount
@@ -70,6 +76,12 @@ targets:
         buildPhase: resources
         type: file
       - path: rmount/Resources/MenuBarIcon@2x.png
+        buildPhase: resources
+        type: file
+      - path: rmount/Resources/MenuBarIconUploading.png
+        buildPhase: resources
+        type: file
+      - path: rmount/Resources/MenuBarIconUploading@2x.png
         buildPhase: resources
         type: file
     settings:

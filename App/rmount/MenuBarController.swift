@@ -22,19 +22,14 @@ final class MenuBarController {
         self.manager = manager
         self.loginItemManager = loginItemManager
         self.prefs = prefs
-        self.updater = UpdateController(prefs: prefs)
+        self.updater = UpdateController(prefs: prefs, manager: manager)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            if let icon = NSImage(named: "MenuBarIcon") {
-                icon.isTemplate = true
-                icon.size = NSSize(width: 18, height: 18)
-                button.image = icon
-            } else {
-                button.title = "⛬"
-            }
-        }
         rebuildMenu()
         manager.$sessions
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.rebuildMenu() }
+            .store(in: &cancellables)
+        manager.$uploadStatus
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.rebuildMenu() }
             .store(in: &cancellables)
@@ -42,6 +37,16 @@ final class MenuBarController {
     }
 
     private func rebuildMenu() {
+        if let button = statusItem.button {
+            let name = manager.pendingUploads().isEmpty ? "MenuBarIcon" : "MenuBarIconUploading"
+            if let icon = NSImage(named: name) {
+                icon.isTemplate = true
+                icon.size = NSSize(width: 18, height: 18)
+                button.image = icon
+            } else {
+                button.title = "⛬"
+            }
+        }
         let menu = NSMenu()
         if manager.sessions.isEmpty {
             menu.addItem(NSMenuItem(title: "(no remotes)", action: nil, keyEquivalent: ""))
@@ -87,6 +92,12 @@ final class MenuBarController {
                 submenu.addItem(delete)
                 item.submenu = submenu
                 menu.addItem(item)
+                if isMounted(session), let status = manager.uploadStatus[session.id], status.hasPending {
+                    let progress = NSMenuItem(title: status.menuText, action: nil, keyEquivalent: "")
+                    progress.isEnabled = false
+                    progress.indentationLevel = 1
+                    menu.addItem(progress)
+                }
             }
         }
         menu.addItem(NSMenuItem.separator())
@@ -108,6 +119,14 @@ final class MenuBarController {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
+    }
+
+    func confirmQuit() async -> Bool {
+        if updater.isRelaunching { return true }
+        await manager.refreshUploadStatus()
+        return UploadSafetyAlert.confirm(
+            UploadGuard.warning(for: .quit, uploads: manager.pendingUploads())
+        )
     }
 
     private func isMounted(_ session: RemoteSession) -> Bool {
@@ -134,7 +153,11 @@ final class MenuBarController {
             do {
                 switch session.status {
                 case .starting, .stopping: return        // already working on it
-                case .mounted: try await manager.unmount(remoteID: id)
+                case .mounted:
+                    await manager.refreshUploadStatus(remoteID: id)
+                    let uploads = manager.uploadStatus[id].map { [(remoteName: session.remote.name, status: $0)] } ?? []
+                    guard UploadSafetyAlert.confirm(UploadGuard.warning(for: .unmount, uploads: uploads)) else { return }
+                    try await manager.unmount(remoteID: id)
                 default: try await manager.mount(remoteID: id)
                 }
             } catch {
@@ -153,8 +176,13 @@ final class MenuBarController {
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        do { try manager.delete(id) }
-        catch { NSAlert(error: error).runModal() }
+        Task { @MainActor in
+            await manager.refreshUploadStatus(remoteID: id)
+            let uploads = manager.uploadStatus[id].map { [(remoteName: session.remote.name, status: $0)] } ?? []
+            guard UploadSafetyAlert.confirm(UploadGuard.warning(for: .unmount, uploads: uploads)) else { return }
+            do { try manager.delete(id) }
+            catch { NSAlert(error: error).runModal() }
+        }
     }
 
     @objc private func editRemote(_ sender: NSMenuItem) {

@@ -5,6 +5,12 @@ import Darwin
 @MainActor
 public final class SessionManager: ObservableObject {
     @Published public private(set) var sessions: [RemoteSession] = []
+    @Published public private(set) var uploadStatus: [UUID: UploadStatus] = [:]
+
+    private var uploadMonitors: [UUID: UploadMonitor] = [:]
+    private var uploadClients: [UUID: RcloneControlClient] = [:]
+    private var uploadGenerations: [UUID: UUID] = [:]
+    private let controlClient: (RcloneProcess.Spawned) -> RcloneControlClient
 
     private let store: RemoteStore
     private let keychain: KeychainService
@@ -25,7 +31,10 @@ public final class SessionManager: ObservableObject {
         mounter: Mounter,
         logsDir: URL,
         rcloneBinary: URL,
-        hostKeyVerifier: HostKeyVerifier? = nil
+        hostKeyVerifier: HostKeyVerifier? = nil,
+        controlClient: @escaping (RcloneProcess.Spawned) -> RcloneControlClient = {
+            URLSessionRcloneControlClient(port: $0.rcPort, user: $0.rcUser, password: $0.rcPassword)
+        }
     ) {
         self.store = store
         self.keychain = keychain
@@ -33,13 +42,53 @@ public final class SessionManager: ObservableObject {
         self.logsDir = logsDir
         self.rcloneBinary = rcloneBinary
         self.hostKeyVerifier = hostKeyVerifier
+        self.controlClient = controlClient
         try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+    }
+
+    public func pendingUploads() -> [(remoteName: String, status: UploadStatus)] {
+        sessions.compactMap { session in
+            guard let status = uploadStatus[session.id], status.hasPending else { return nil }
+            return (remoteName: session.remote.name, status: status)
+        }
+    }
+
+    func startUploadMonitor(remoteID: UUID, client: RcloneControlClient) {
+        stopUploadMonitor(remoteID: remoteID)
+        uploadClients[remoteID] = client
+        let generation = UUID()
+        uploadGenerations[remoteID] = generation
+        uploadMonitors[remoteID] = UploadMonitor(client: client) { [weak self] status in
+            guard let self, self.uploadGenerations[remoteID] == generation else { return }
+            self.uploadStatus[remoteID] = status
+        }
+    }
+
+    public func refreshUploadStatus(remoteID: UUID? = nil) async {
+        for id in Array(uploadClients.keys) where remoteID == nil || id == remoteID {
+            guard let client = uploadClients[id] else { continue }
+            let generation = uploadGenerations[id]
+            if let status = try? await client.vfsQueue().status,
+               generation != nil, uploadGenerations[id] == generation {
+                uploadStatus[id] = status
+            }
+        }
+    }
+
+    private func stopUploadMonitor(remoteID: UUID) {
+        uploadClients[remoteID] = nil
+        uploadGenerations[remoteID] = nil
+        uploadMonitors.removeValue(forKey: remoteID)?.stop()
+        uploadStatus[remoteID] = nil
     }
 
     public func reload() throws {
         let remotes = try store.load()
         let existingByID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
         let newSessions = remotes.map { existingByID[$0.id] ?? RemoteSession(remote: $0) }
+        for id in uploadMonitors.keys where !newSessions.contains(where: { $0.id == id }) {
+            stopUploadMonitor(remoteID: id)
+        }
         sessions = newSessions
         // Re-subscribe each session's status changes so the menu (which subscribes to
         // $sessions) rebuilds when a status flips. Without this, mount → unmount label
@@ -431,7 +480,7 @@ public final class SessionManager: ObservableObject {
     public func mount(remoteID: UUID) async throws {
         guard let session = sessions.first(where: { $0.id == remoteID }) else { return }
         switch session.status {
-        case .starting, .stopping: return    // an operation is already in flight
+        case .starting, .stopping, .mounted: return    // an operation is already in flight
         default: break
         }
         session.transition(to: .starting)
@@ -513,6 +562,7 @@ public final class SessionManager: ObservableObject {
             session.ephemeralKeyURL = ephemeralKeyURL
             session.rcloneConfigURL = spawned.configURL
             session.transition(to: .mounted(at: mountpoint))
+            startUploadMonitor(remoteID: remoteID, client: controlClient(spawned))
         } catch {
             if let url = ephemeralKeyURL { try? FileManager.default.removeItem(at: url) }
             if let proc = spawnedProcess, proc.isRunning { proc.terminate() }
@@ -560,6 +610,7 @@ public final class SessionManager: ObservableObject {
     }
 
     private func finishUnmount(_ session: RemoteSession) {
+        stopUploadMonitor(remoteID: session.id)
         let proc = session.rcloneProcess
         session.rcloneProcess = nil          // so the exit watcher sees this was intentional
         if let proc, proc.isRunning {
@@ -600,6 +651,7 @@ public final class SessionManager: ObservableObject {
     func handleRcloneExit(session: RemoteSession, process: Process) async {
         // Intentional unmount/shutdown detach the process first; anything else is a surprise.
         guard session.rcloneProcess === process, case .mounted = session.status else { return }
+        stopUploadMonitor(remoteID: session.id)
         let status = process.terminationStatus
         let mountpoint = session.mountpoint
         session.rcloneProcess = nil

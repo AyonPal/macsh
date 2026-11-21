@@ -7,6 +7,9 @@ public final class RcloneProcess {
         public let port: Int
         public let user: String
         public let password: String
+        public let rcPort: Int
+        public let rcUser: String
+        public let rcPassword: String
         /// The temporary rclone config; rclone may rewrite it (e.g. refreshed OAuth tokens).
         public let configURL: URL
     }
@@ -90,6 +93,10 @@ public final class RcloneProcess {
         catch { throw SpawnError.failedToWriteConfig(error) }
 
         let port = try Self.findFreePort()
+        var rcPort = try Self.findFreePort()
+        while rcPort == port { rcPort = try Self.findFreePort() }
+        let rcUser = "rmount-\(UUID().uuidString)"
+        let rcPassword = UUID().uuidString
         let user = includeAuth ? "rmount-\(UUID().uuidString.prefix(8))" : ""
         let password = includeAuth ? UUID().uuidString : ""
 
@@ -100,6 +107,7 @@ public final class RcloneProcess {
             "\(remoteName):\(remotePath)",
             "--config", configURL.path,
             "--addr", "127.0.0.1:\(port)",
+            "--rc", "--rc-addr", "127.0.0.1:\(rcPort)",
         ]
         if includeAuth {
             args.append(contentsOf: ["--user", user, "--pass", password])
@@ -108,6 +116,8 @@ public final class RcloneProcess {
         process.arguments = args
         var env = ProcessInfo.processInfo.environment
         for (k, v) in envOverrides { env[k] = v }
+        env["RCLONE_RC_USER"] = rcUser
+        env["RCLONE_RC_PASS"] = rcPassword
         process.environment = env
 
         FileManager.default.createFile(atPath: logFile.path, contents: nil)
@@ -118,7 +128,7 @@ public final class RcloneProcess {
         do { try process.run() }
         catch { throw SpawnError.launchFailed(error) }
 
-        return Spawned(process: process, port: port, user: user, password: password, configURL: configURL)
+        return Spawned(process: process, port: port, user: user, password: password, rcPort: rcPort, rcUser: rcUser, rcPassword: rcPassword, configURL: configURL)
     }
 
     /// Runs `rclone obscure <plaintext>` and returns the obscured form. rclone's env-var

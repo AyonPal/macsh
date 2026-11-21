@@ -7,13 +7,16 @@ import RMountCore
 @MainActor
 final class UpdateController {
     private let prefs: UserPreferences
+    private let manager: SessionManager
+    private(set) var isRelaunching = false
     private let checker = UpdateChecker()
     private var busy = false
     private var progressWindow: NSWindow?
     private var progressLabel: NSTextField?
 
-    init(prefs: UserPreferences) {
+    init(prefs: UserPreferences, manager: SessionManager) {
         self.prefs = prefs
+        self.manager = manager
     }
 
     /// At launch: checks silently about once a day and only speaks up when there is an update.
@@ -85,6 +88,10 @@ final class UpdateController {
         }
         do {
             let dmg = try await UpdateInstaller.download(update.asset, to: work)
+            await manager.refreshUploadStatus()
+            guard UploadSafetyAlert.confirm(
+                UploadGuard.warning(for: .installUpdate, uploads: manager.pendingUploads())
+            ) else { return }
             progressLabel?.stringValue = "Installing…"
             let app = Bundle.main.bundleURL
             let digest = update.asset.digest
@@ -93,6 +100,7 @@ final class UpdateController {
             }.value
             hideProgress()
             try UpdateInstaller.relaunchProcess(appURL: installed).run()
+            isRelaunching = true
             NSApp.terminate(nil)
         } catch {
             hideProgress()

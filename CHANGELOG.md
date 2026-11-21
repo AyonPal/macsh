@@ -17,6 +17,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Upload status in the menu and a warning before quitting, unmounting or updating while files are still uploading. Upload counts and sizes exclude Finder's AppleDouble (`._`) sidecar files.
 - Homebrew casks moved to the combined tap `fperdigon/homebrew-tap` (`brew install --cask fperdigon/tap/rmount` and `fperdigon/tap/rmount-lite`).
 
 ## [0.1.5] — 2026-10-25

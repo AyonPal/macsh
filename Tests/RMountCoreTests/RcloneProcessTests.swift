@@ -37,6 +37,14 @@ final class RcloneProcessTests: XCTestCase {
         XCTAssertTrue(lines.contains(spawned.password))
         XCTAssertTrue(lines.contains("ENV:RMOUNT_TEST_ENV=hello"))
         XCTAssertGreaterThan(spawned.port, 0)
+        XCTAssertGreaterThan(spawned.rcPort, 0)
+        XCTAssertNotEqual(spawned.port, spawned.rcPort)
+        XCTAssertTrue(lines.contains("--rc"))
+        XCTAssertTrue(lines.contains("127.0.0.1:\(spawned.rcPort)"))
+        XCTAssertEqual(spawned.process.environment?["RCLONE_RC_USER"], spawned.rcUser)
+        XCTAssertEqual(spawned.process.environment?["RCLONE_RC_PASS"], spawned.rcPassword)
+        XCTAssertFalse(spawned.process.arguments!.contains(spawned.rcUser))
+        XCTAssertFalse(spawned.process.arguments!.contains(spawned.rcPassword))
         XCTAssertTrue(spawned.user.hasPrefix("rmount-"))
 
         // The config text is written to the file passed via --config.
@@ -78,6 +86,12 @@ final class RcloneProcessTests: XCTestCase {
         let a = try runner.spawnNFSServe(remoteName: "r", remotePath: "/", configText: "[r]\n", liveUpdates: false)
         defer { a.process.terminate() }
         XCTAssertGreaterThan(a.port, 1023)
+        let b = try runner.spawnNFSServe(remoteName: "r", remotePath: "/", configText: "[r]\n", liveUpdates: false)
+        defer { b.process.terminate() }
+        XCTAssertNotEqual(a.rcPort, a.port)
+        XCTAssertNotEqual(b.rcPort, b.port)
+        XCTAssertNotEqual(a.rcUser, b.rcUser)
+        XCTAssertNotEqual(a.rcPassword, b.rcPassword)
     }
 
     func testLaunchFailureThrows() throws {

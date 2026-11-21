@@ -1,17 +1,18 @@
 #!/usr/bin/env swift
 // Draws the RMount icon (a drive labeled "RM") and writes it as a PNG.
-// Usage: scripts/make-icon.swift <size> <out.png> [menubar]
+// Usage: scripts/make-icon.swift <size> <out.png> [menubar|menubar-uploading]
 // By default it draws the app icon (white drive on an indigo tile). With "menubar" it draws the
-// black-on-transparent template glyph for the menu bar, with the letters cut out of the drive.
+// black-on-transparent template glyph. "menubar-uploading" replaces the letters with an up arrow.
 // scripts/make-icon.sh builds the .icns, docs/icon.png and the menu bar images from it.
 import AppKit
 
 let args = CommandLine.arguments
 guard args.count == 3 || args.count == 4, let size = Int(args[1]), size > 0 else {
-    FileHandle.standardError.write(Data("usage: make-icon.swift <size> <out.png> [menubar]\n".utf8))
+    FileHandle.standardError.write(Data("usage: make-icon.swift <size> <out.png> [menubar|menubar-uploading]\n".utf8))
     exit(2)
 }
-let menubar = args.count == 4 && args[3] == "menubar"
+let uploading = args.count == 4 && args[3] == "menubar-uploading"
+let menubar = args.count == 4 && (args[3] == "menubar" || uploading)
 
 let indigo = NSColor(srgbRed: 0x5B / 255, green: 0x4B / 255, blue: 0xDB / 255, alpha: 1)
 let white = NSColor.white
@@ -83,8 +84,16 @@ if menubar {
     // Template image: the drive is solid black and the letters are cut out of it.
     fill(black, drive)
     ctx.setBlendMode(.clear)
-    stroke(black, width: 9, letterR)
-    stroke(black, width: 9, letterM)
+    if uploading {
+        let arrow = CGMutablePath()
+        arrow.move(to: CGPoint(x: 90, y: 85)); arrow.addLine(to: CGPoint(x: 90, y: 55))
+        arrow.move(to: CGPoint(x: 76, y: 69)); arrow.addLine(to: CGPoint(x: 90, y: 55))
+        arrow.addLine(to: CGPoint(x: 104, y: 69))
+        stroke(black, width: 9, arrow)
+    } else {
+        stroke(black, width: 9, letterR)
+        stroke(black, width: 9, letterM)
+    }
     ctx.setBlendMode(.normal)
     stroke(black, width: 9, stem)
     fill(black, dot)

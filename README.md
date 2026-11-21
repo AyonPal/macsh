@@ -49,6 +49,7 @@ so nothing needs to be installed in the kernel.
 - **Import from `rclone.conf`**: bring your existing remotes with you.
 - **Per-remote performance settings**: Energy saving / Responsive updates, cache mode, read-ahead, buffer size, write-back delay.
 - **Live updates**: changes on the server show up in seconds in Responsive mode, or within a few minutes in the default Energy saving mode.
+- **Upload status**: see pending uploads in the menu, with a warning before quitting, unmounting or updating.
 - **Auto-mount at login.**
 - **Passwords stored in your Keychain**, never on disk in plaintext.
 
