@@ -132,4 +132,46 @@ final class UploadQueueIntegrationTests: XCTestCase {
         XCTAssertTrue(queue.queue.isEmpty)
         XCTAssertFalse(queue.status.hasPending)
     }
+
+    func testThrottledUploadAppearsInCoreStatsWhileQueued() async throws {
+        let (runner, dir) = try fixture()
+        let backend = dir.appendingPathComponent("backend")
+        var tuning = TransferTuning.defaults(for: .webdav)
+        tuning.cacheMode = .full
+        tuning.writeBack = "1s"
+        let spawned = try runner.spawnWebDAVServe(
+            remoteName: "r", remotePath: backend.path, configText: "[r]\ntype = local\n",
+            baseurl: "/", liveUpdates: false, tuning: tuning,
+            extraArgs: ["--cache-dir", dir.appendingPathComponent("cache").path, "--bwlimit", "64k"])
+        manage(spawned)
+        let client = URLSessionRcloneControlClient(port: spawned.rcPort, user: spawned.rcUser, password: spawned.rcPassword)
+        _ = try await ready(client, spawned: spawned)
+
+        let name = "progress.bin"
+        let payload = Data(repeating: 0x42, count: 512 * 1024)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(spawned.port)/\(name)")!)
+        request.httpMethod = "PUT"
+        request.httpBody = payload
+        request.timeoutInterval = 30
+        let auth = Data("\(spawned.user):\(spawned.password)".utf8).base64EncodedString()
+        request.setValue("Basic \(auth)", forHTTPHeaderField: "Authorization")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertTrue((200..<300).contains(try XCTUnwrap(response as? HTTPURLResponse).statusCode))
+
+        // The bandwidth limit gives the condition a wide observation window; the test
+        // waits for telemetry rather than assuming the upload starts at a fixed time.
+        var observed = false
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline {
+            let queue = try await client.vfsQueue()
+            let stats = try await client.coreStats()
+            if queue.queue.contains(where: { $0.name == name && $0.uploading == true }),
+               stats.transferring.contains(where: { $0.name == name }) {
+                observed = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertTrue(observed, "The throttled VFS upload did not appear in core/stats while queued")
+    }
 }

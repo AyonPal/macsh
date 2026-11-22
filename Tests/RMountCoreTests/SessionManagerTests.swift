@@ -635,6 +635,8 @@ private actor SessionControlClient: RcloneControlClient {
     var queue = VFSQueue(queue: [.init(name: "pending", size: 42)])
     var calls = 0
     var blockNext = false
+    var stats = RcloneStats()
+    var statsFail = false
     var waiting: CheckedContinuation<Void, Never>?
     func vfsQueue() async throws -> VFSQueue {
         calls += 1
@@ -645,12 +647,29 @@ private actor SessionControlClient: RcloneControlClient {
         }
         return result
     }
+    func coreStats() async throws -> RcloneStats {
+        if statsFail { throw URLError(.cannotConnectToHost) }
+        return stats
+    }
+    func setStats(_ value: RcloneStats) { stats = value }
+    func failStats() { statsFail = true }
+    func setQueue(_ value: VFSQueue) { queue = value }
     func delayNext() { blockNext = true }
     func release() { blockNext = false; waiting?.resume(); waiting = nil }
     func drain() { queue = VFSQueue() }
 }
 
 extension SessionManagerTests {
+    private func waitForUploads(_ condition: @escaping @MainActor () async -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await condition() { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Timed out waiting for upload telemetry")
+        throw URLError(.timedOut)
+    }
+
     func testRefreshingSeveralRemotesUsesTheirCurrentClients() async throws {
         let clients = [SessionControlClient(), SessionControlClient()]
         let f = try makeFixture()
@@ -660,17 +679,20 @@ extension SessionManagerTests {
             try f.manager.add(remote)
             f.manager.startUploadMonitor(remoteID: remote.id, client: client)
         }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        try await waitForUploads { remotes.allSatisfy { f.manager.uploadStatus[$0.id]?.queuedCount == 1 } }
         for client in clients {
             await client.drain()
             await client.delayNext()
         }
         let refresh = Task { await f.manager.refreshUploadStatus() }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        try await waitForUploads {
+            for client in clients { if await client.waiting != nil { return true } }
+            return false
+        }
         for remote in remotes {
             f.manager.startUploadMonitor(remoteID: remote.id, client: SessionControlClient())
         }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        try await waitForUploads { remotes.allSatisfy { f.manager.uploadStatus[$0.id]?.queuedCount == 1 } }
         for client in clients { await client.release() }
         await refresh.value
         for remote in remotes {
@@ -686,13 +708,13 @@ extension SessionManagerTests {
         let remote = makeRemote(backend: sftpBackend())
         try f.manager.add(remote)
         f.manager.startUploadMonitor(remoteID: remote.id, client: oldClient)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        try await waitForUploads { f.manager.uploadStatus[remote.id]?.queuedCount == 1 }
         await oldClient.drain()
         await oldClient.delayNext()
         let refresh = Task { await f.manager.refreshUploadStatus() }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        try await waitForUploads { await oldClient.waiting != nil }
         f.manager.startUploadMonitor(remoteID: remote.id, client: newClient)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        try await waitForUploads { f.manager.uploadStatus[remote.id]?.queuedCount == 1 }
         await oldClient.release()
         await refresh.value
         XCTAssertEqual(f.manager.uploadStatus[remote.id]?.queuedCount, 1)
@@ -708,7 +730,7 @@ extension SessionManagerTests {
         session.mountpoint = f.dir.appendingPathComponent("fake-mount").path
         session.transition(to: .mounted(at: session.mountpoint!))
         f.manager.startUploadMonitor(remoteID: remote.id, client: client)
-        try await Task.sleep(nanoseconds: 30_000_000)
+        try await waitForUploads { f.manager.uploadStatus[remote.id]?.queuedCount == 1 }
         XCTAssertEqual(f.manager.uploadStatus[remote.id]?.queuedCount, 1)
         XCTAssertEqual(f.manager.pendingUploads().map(\.remoteName), [remote.name])
         await client.drain()
@@ -729,7 +751,7 @@ extension SessionManagerTests {
         try f.manager.add(remote, sftpSecrets: pw)
         XCTAssertTrue(f.manager.uploadStatus.isEmpty)
         try await f.manager.mount(remoteID: remote.id)
-        try await Task.sleep(nanoseconds: 30_000_000)
+        try await waitForUploads { f.manager.uploadStatus[remote.id]?.queuedCount == 1 }
         XCTAssertEqual(f.manager.uploadStatus[remote.id]?.queuedCount, 1)
         XCTAssertEqual(f.manager.pendingUploads().map(\.remoteName), [remote.name])
         await client.drain()
@@ -743,4 +765,73 @@ extension SessionManagerTests {
         let final = await client.calls
         XCTAssertEqual(stopped, final)
     }
+
+    func testRefreshPublishesTransferProgressAndStatsFailures() async throws {
+        let client = SessionControlClient()
+        let f = try makeFixture(controlClient: client)
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        await client.setQueue(VFSQueue(queue: [.init(name: "folder/upload.bin", size: 100, uploading: true)]))
+        await client.setStats(RcloneStats(transferring: [.init(name: "folder/upload.bin", bytes: 40,
+                                                               size: 100, speed: 10, eta: 6)]))
+        f.manager.startUploadMonitor(remoteID: remote.id, client: client)
+        try await waitForUploads { f.manager.uploadStatus[remote.id]?.transfers.first?.bytesDone == 40 }
+        XCTAssertEqual(f.manager.uploadStatus[remote.id]?.summary.bytesLeft, 60)
+        await client.setStats(RcloneStats(transferring: [.init(name: "folder/upload.bin", bytes: 100, size: 100)]))
+        await f.manager.refreshUploadStatus(remoteID: remote.id)
+        XCTAssertEqual(f.manager.uploadStatus[remote.id]?.transfers.first?.state, .finishing)
+        XCTAssertFalse(f.manager.pendingUploads().isEmpty)
+        await client.failStats()
+        await f.manager.refreshUploadStatus(remoteID: remote.id)
+        await f.manager.refreshUploadStatus(remoteID: remote.id)
+        XCTAssertEqual(f.manager.uploadStatus[remote.id]?.isStale, true)
+        XCTAssertEqual(f.manager.uploadStatus[remote.id]?.queuedCount, 1)
+        XCTAssertNil(f.manager.uploadStatus[remote.id]?.transfers.first?.bytesDone)
+        try await f.manager.unmount(remoteID: remote.id)
+    }
+
+    func testRemovedRemoteIgnoresInFlightRefresh() async throws {
+        let client = SessionControlClient()
+        let f = try makeFixture(controlClient: client)
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        f.manager.startUploadMonitor(remoteID: remote.id, client: client)
+        try await waitForUploads { f.manager.uploadStatus[remote.id]?.queuedCount == 1 }
+        await client.delayNext()
+        let refresh = Task { await f.manager.refreshUploadStatus(remoteID: remote.id) }
+        try await waitForUploads { await client.waiting != nil }
+        try f.manager.delete(remote.id)
+        await client.release()
+        await refresh.value
+        XCTAssertNil(f.manager.uploadStatus[remote.id])
+        XCTAssertTrue(f.manager.pendingUploads().isEmpty)
+    }
+
+    func testConcurrentExplicitRefreshesShareOneQueueSnapshot() async throws {
+        let client = SessionControlClient()
+        let f = try makeFixture(controlClient: client)
+        let remote = makeRemote(backend: sftpBackend())
+        try f.manager.add(remote)
+        f.manager.startUploadMonitor(remoteID: remote.id, client: client)
+        try await waitForUploads { f.manager.uploadStatus[remote.id]?.queuedCount == 1 }
+        await client.drain()
+        await client.delayNext()
+        let first = Task { await f.manager.refreshUploadStatus(remoteID: remote.id) }
+        try await waitForUploads { await client.waiting != nil }
+        let blockedCalls = await client.calls
+        var secondStarted = false
+        let second = Task {
+            secondStarted = true
+            await f.manager.refreshUploadStatus(remoteID: remote.id)
+        }
+        try await waitForUploads { secondStarted }
+        await client.release()
+        await first.value
+        await second.value
+        let completedCalls = await client.calls
+        XCTAssertEqual(completedCalls, blockedCalls)
+        XCTAssertTrue(f.manager.pendingUploads().isEmpty)
+        try await f.manager.unmount(remoteID: remote.id)
+    }
+
 }

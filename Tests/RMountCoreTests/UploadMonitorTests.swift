@@ -35,12 +35,19 @@ private actor FakeControlClient: RcloneControlClient {
     var calls = 0
     var queue: VFSQueue
     var fails = false
+    var statsFail = false
+    var stats = RcloneStats()
     init(_ queue: VFSQueue = VFSQueue()) { self.queue = queue }
     func vfsQueue() async throws -> VFSQueue {
         calls += 1
         if fails { throw URLError(.cannotConnectToHost) }
         return queue
     }
+    func coreStats() async throws -> RcloneStats {
+        if statsFail { throw URLError(.cannotConnectToHost) }
+        return stats
+    }
+    func setStats(_ stats: RcloneStats, fails: Bool = false) { self.stats = stats; statsFail = fails }
     func setQueue(_ queue: VFSQueue) { self.queue = queue }
     func setFails() { fails = true }
 }
@@ -62,7 +69,9 @@ final class UploadMonitorTests: XCTestCase {
         let queue = try JSONDecoder().decode(VFSQueue.self, from: Data(json.utf8))
         XCTAssertEqual(queue.queue[0], VFSQueue.Entry(name: "a", id: 1, size: 1200, uploading: true, expiry: 20.5, tries: 0, delay: 20))
         XCTAssertNil(queue.queue[2].name)
-        XCTAssertEqual(queue.status, UploadStatus(queuedCount: 4, uploadingCount: 1, totalBytes: 1500))
+        XCTAssertEqual(queue.status.queuedCount, 4)
+        XCTAssertEqual(queue.status.uploadingCount, 1)
+        XCTAssertEqual(queue.status.totalBytes, 1500)
         XCTAssertTrue(queue.status.hasPending)
         XCTAssertTrue(queue.status.menuText.hasPrefix("Uploading 4 files ("))
         XCTAssertTrue(UploadStatus(queuedCount: 1).menuText.hasPrefix("Uploading 1 file ("))
@@ -76,7 +85,9 @@ final class UploadMonitorTests: XCTestCase {
             .init(name: "._big2.bin", size: 4096, uploading: false),
             .init(size: 500, uploading: true)
         ])
-        XCTAssertEqual(queue.status, UploadStatus(queuedCount: 3, uploadingCount: 2, totalBytes: 3500))
+        XCTAssertEqual(queue.status.queuedCount, 3)
+        XCTAssertEqual(queue.status.uploadingCount, 2)
+        XCTAssertEqual(queue.status.totalBytes, 3500)
         XCTAssertTrue(queue.status.hasPending)
     }
 
@@ -100,7 +111,9 @@ final class UploadMonitorTests: XCTestCase {
             .init(name: "file._part.bin", size: 1000, uploading: true),
             .init(name: "._dir/real.bin", size: 2000, uploading: false)
         ])
-        XCTAssertEqual(queue.status, UploadStatus(queuedCount: 2, uploadingCount: 1, totalBytes: 3000))
+        XCTAssertEqual(queue.status.queuedCount, 2)
+        XCTAssertEqual(queue.status.uploadingCount, 1)
+        XCTAssertEqual(queue.status.totalBytes, 3000)
         XCTAssertTrue(queue.status.hasPending)
     }
 
@@ -156,7 +169,7 @@ final class UploadMonitorTests: XCTestCase {
             await client.calls > stillIdleCalls
         }
         XCTAssertTrue(sawFailedPoll, "Expected another poll after the client began failing")
-        XCTAssertEqual(statuses.last, UploadStatus())
+        XCTAssertFalse(try XCTUnwrap(statuses.last).hasPending)
         monitor.stop()
         let stoppedCalls = await client.calls
         try await Task.sleep(nanoseconds: 300_000_000)
@@ -169,12 +182,62 @@ final class UploadMonitorTests: XCTestCase {
         let client = FakeControlClient()
         var monitor: UploadMonitor? = UploadMonitor(client: client, intervals: .init(pending: 0.01, idle: 0.01)) { _ in }
         XCTAssertNotNil(monitor)
-        try await Task.sleep(nanoseconds: 25_000_000)
+        let started = try await waitUntil { await client.calls > 0 }
+        XCTAssertTrue(started)
+        weak var weakMonitor = monitor
         monitor = nil
+        let released = try await waitUntil { weakMonitor == nil }
+        XCTAssertTrue(released)
         let stopped = await client.calls
-        try await Task.sleep(nanoseconds: 35_000_000)
+        try await Task.sleep(nanoseconds: 300_000_000)
         let final = await client.calls
         XCTAssertEqual(stopped, final)
+    }
+
+    func testStatsRequestUsesSameLoopbackAuthAndNoShortOrGroup() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ControlURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel(); ControlURLProtocol.handler = nil }
+        ControlURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:43210/core/stats")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.timeoutInterval, 3)
+            XCTAssertNil(request.httpBody)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Basic " + Data("u:p".utf8).base64EncodedString())
+            return (200, Data("{\"transferring\":[{\"name\":\"a\"}]}".utf8))
+        }
+        let stats = try await URLSessionRcloneControlClient(port: 43210, user: "u", password: "p", session: session).coreStats()
+        XCTAssertEqual(stats.transferring.first?.name, "a")
+    }
+
+    @MainActor
+    func testPartialFailuresInvalidateProgressRetainQueueAndBecomeStale() async throws {
+        let client = FakeControlClient(VFSQueue(queue: [.init(name: "a", size: 100, uploading: true)]))
+        await client.setStats(RcloneStats(transferring: [.init(name: "a", bytes: 50, speed: 10)]))
+        var statuses: [UploadStatus] = []
+        let monitor = UploadMonitor(client: client, intervals: .init(pending: 60, idle: 60)) { statuses.append($0) }
+        let first = await monitor.refresh()
+        XCTAssertEqual(first.transfers.first?.bytesDone, 50)
+        await client.setStats(RcloneStats(), fails: true)
+        let partial = await monitor.refresh()
+        XCTAssertTrue(partial.hasPending)
+        XCTAssertNil(partial.transfers.first?.bytesDone)
+        XCTAssertFalse(partial.isStale)
+        let stale = await monitor.refresh()
+        XCTAssertTrue(stale.isStale)
+        await client.setStats(RcloneStats())
+        let recovered = await monitor.refresh()
+        XCTAssertFalse(recovered.isStale)
+        await client.setFails()
+        let retained = await monitor.refresh()
+        XCTAssertTrue(retained.hasPending)
+        XCTAssertNil(retained.transfers.first?.fraction)
+        _ = await monitor.refresh()
+        XCTAssertTrue(try XCTUnwrap(statuses.last).isStale)
+        monitor.stop()
+        let stopped = await monitor.refresh()
+        XCTAssertTrue(stopped.hasPending)
     }
 
     func testGuardWarnsOnlyForPendingAndUsesActionText() throws {

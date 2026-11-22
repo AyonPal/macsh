@@ -8,6 +8,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Upload summaries now show estimated bytes left and time remaining, and open the Transfers window when clicked.
 - rclone logs are now kept for 30 days (one file per mount, next to the current log) instead of being overwritten on every mount.
 - Remotes without change notifications (SFTP, FTP, S3, SMB, WebDAV and the like) now default to an Energy saving mode with a 5 minute directory cache, so rclone stops re-listing the server every 10 seconds and uses far less CPU and battery. Responsive mode (10 seconds, the previous behaviour) can be chosen per remote under Performance > Updates.
 - The menu bar icon and the About page use the new RM drive icon (they still showed the old folder icon and a generic drive symbol).
@@ -18,6 +19,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A live Transfers window, available globally and from each remote's menu, shows per-file upload progress, speed, retries and finishing state. Unavailable telemetry is marked while pending uploads remain visible.
 - Upload status in the menu and a warning before quitting, unmounting or updating while files are still uploading. Upload counts and sizes exclude Finder's AppleDouble (`._`) sidecar files.
 - Homebrew casks moved to the combined tap `fperdigon/homebrew-tap` (`brew install --cask fperdigon/tap/rmount` and `fperdigon/tap/rmount-lite`).
 

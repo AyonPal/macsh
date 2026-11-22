@@ -12,6 +12,8 @@ final class MenuBarController {
     private var cancellables = Set<AnyCancellable>()
     private var addWindow: NSWindow?
     private var importWindow: NSWindow?
+    private var transfersWindow: NSWindow?
+    private let transfersNavigator = TransfersView.Navigator()
     private var settingsWindow: NSWindow?
     private let settingsNavigator = SettingsView.Navigator()
     private var editWindows: [UUID: NSWindow] = [:]
@@ -76,6 +78,10 @@ final class MenuBarController {
                 mountToggle.target = self
                 mountToggle.representedObject = session.id
                 submenu.addItem(mountToggle)
+                let transfers = NSMenuItem(title: "Transfers…", action: #selector(showTransfers(_:)), keyEquivalent: "")
+                transfers.target = self
+                transfers.representedObject = session.id
+                submenu.addItem(transfers)
                 let viewLog = NSMenuItem(title: "View log…", action: #selector(showLog(_:)), keyEquivalent: "")
                 viewLog.target = self
                 viewLog.representedObject = session.id
@@ -93,14 +99,18 @@ final class MenuBarController {
                 item.submenu = submenu
                 menu.addItem(item)
                 if isMounted(session), let status = manager.uploadStatus[session.id], status.hasPending {
-                    let progress = NSMenuItem(title: status.menuText, action: nil, keyEquivalent: "")
-                    progress.isEnabled = false
+                    let progress = NSMenuItem(title: status.menuText, action: #selector(showTransfers(_:)), keyEquivalent: "")
+                    progress.target = self
+                    progress.representedObject = session.id
                     progress.indentationLevel = 1
                     menu.addItem(progress)
                 }
             }
         }
         menu.addItem(NSMenuItem.separator())
+        let transfers = NSMenuItem(title: "Transfers…", action: #selector(showTransfers(_:)), keyEquivalent: "")
+        transfers.target = self
+        menu.addItem(transfers)
         let add = NSMenuItem(title: "Add remote…", action: #selector(showAdd), keyEquivalent: "n")
         add.target = self
         menu.addItem(add)
@@ -254,6 +264,21 @@ final class MenuBarController {
         win.isReleasedWhenClosed = false
         importWindow = win
         Self.present(importWindow)
+    }
+
+    @objc private func showTransfers(_ sender: NSMenuItem) {
+        transfersNavigator.remoteID = sender.representedObject as? UUID
+        if transfersWindow == nil {
+            let view = TransfersView(manager: manager, navigator: transfersNavigator)
+            let win = NSWindow(contentViewController: NSHostingController(rootView: view))
+            win.title = "Transfers"
+            win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            win.isReleasedWhenClosed = false
+            win.setContentSize(NSSize(width: 580, height: 420))
+            win.contentMinSize = NSSize(width: 420, height: 240)
+            transfersWindow = win
+        }
+        Self.present(transfersWindow)
     }
 
     @objc private func showSettings() {

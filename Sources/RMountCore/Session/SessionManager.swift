@@ -8,7 +8,6 @@ public final class SessionManager: ObservableObject {
     @Published public private(set) var uploadStatus: [UUID: UploadStatus] = [:]
 
     private var uploadMonitors: [UUID: UploadMonitor] = [:]
-    private var uploadClients: [UUID: RcloneControlClient] = [:]
     private var uploadGenerations: [UUID: UUID] = [:]
     private let controlClient: (RcloneProcess.Spawned) -> RcloneControlClient
 
@@ -55,7 +54,6 @@ public final class SessionManager: ObservableObject {
 
     func startUploadMonitor(remoteID: UUID, client: RcloneControlClient) {
         stopUploadMonitor(remoteID: remoteID)
-        uploadClients[remoteID] = client
         let generation = UUID()
         uploadGenerations[remoteID] = generation
         uploadMonitors[remoteID] = UploadMonitor(client: client) { [weak self] status in
@@ -65,18 +63,16 @@ public final class SessionManager: ObservableObject {
     }
 
     public func refreshUploadStatus(remoteID: UUID? = nil) async {
-        for id in Array(uploadClients.keys) where remoteID == nil || id == remoteID {
-            guard let client = uploadClients[id] else { continue }
-            let generation = uploadGenerations[id]
-            if let status = try? await client.vfsQueue().status,
-               generation != nil, uploadGenerations[id] == generation {
-                uploadStatus[id] = status
-            }
+        for id in Array(uploadMonitors.keys) where remoteID == nil || id == remoteID {
+            // Use the same serialized snapshot as background polling, including its
+            // partial-failure and stale handling. Look up each monitor after awaiting
+            // the previous one so a remount cannot refresh an obsolete client.
+            guard let monitor = uploadMonitors[id] else { continue }
+            await monitor.refresh()
         }
     }
 
     private func stopUploadMonitor(remoteID: UUID) {
-        uploadClients[remoteID] = nil
         uploadGenerations[remoteID] = nil
         uploadMonitors.removeValue(forKey: remoteID)?.stop()
         uploadStatus[remoteID] = nil
